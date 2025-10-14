@@ -4,8 +4,8 @@ import time
 import torch
 
 from fireredasr.data.asr_feat import ASRFeatExtractor
-from fireredasr.models.fireredasr_aed import FireRedAsrAed
-from fireredasr.models.fireredasr_llm import FireRedAsrLlm
+from fireredasr.models.fireredasr_aed import FireRedAsrAed_ov, FireRedAsrAed
+from fireredasr.models.fireredasr_llm import FireRedAsrLlm, FireRedAsrLlm_ov
 from fireredasr.tokenizer.aed_tokenizer import ChineseCharEnglishSpmTokenizer
 from fireredasr.tokenizer.llm_tokenizer import LlmTokenizerWrapper
 
@@ -64,7 +64,6 @@ class FireRedAsr:
 
             elapsed = time.time() - start_time
             rtf= elapsed / total_dur if total_dur > 0 else 0
-
             results = []
             for uttid, wav, hyp in zip(batch_uttid, batch_wav_path, hyps):
                 hyp = hyp[0]  # only return 1-best
@@ -105,21 +104,29 @@ class FireRedAsr:
             return results
 
 
-
 def load_fireredasr_aed_model(model_path):
-    package = torch.load(model_path, map_location=lambda storage, loc: storage)
-    print("model args:", package["args"])
-    model = FireRedAsrAed.from_args(package["args"])
-    model.load_state_dict(package["model_state_dict"], strict=True)
-    return model
+    model_ov = FireRedAsrAed_ov(None, model_path, infer_type="bf16")
+    # model_ov.using_ov = False
+    if not model_ov.using_ov:
+        package = torch.load(model_path, map_location=lambda storage, loc: storage)
+        print("model args:", package["args"])
+        model = FireRedAsrAed.from_args(package["args"])
+        model.load_state_dict(package["model_state_dict"], strict=True)
+        model.eval()
+        model_ov.torch_model = model
+    return model_ov
 
 
 def load_firered_llm_model_and_tokenizer(model_path, encoder_path, llm_dir):
-    package = torch.load(model_path, map_location=lambda storage, loc: storage)
-    package["args"].encoder_path = encoder_path
-    package["args"].llm_dir = llm_dir
-    print("model args:", package["args"])
-    model = FireRedAsrLlm.from_args(package["args"])
-    model.load_state_dict(package["model_state_dict"], strict=False)
+    model_ov = FireRedAsrLlm_ov(None, model_path, infer_type="bf16")
+    # model_ov.using_ov = False
+    if not model_ov.using_ov:
+        package = torch.load(model_path, map_location=lambda storage, loc: storage)
+        package["args"].encoder_path = encoder_path
+        package["args"].llm_dir = llm_dir
+        print("model args:", package["args"])
+        model = FireRedAsrLlm.from_args(package["args"])
+        model.load_state_dict(package["model_state_dict"], strict=False)
+        model_ov.llm_model = model
     tokenizer = LlmTokenizerWrapper.build_llm_tokenizer(llm_dir)
-    return model, tokenizer
+    return model_ov, tokenizer

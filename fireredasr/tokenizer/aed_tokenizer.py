@@ -65,3 +65,90 @@ class ChineseCharEnglishSpmTokenizer:
         if replace_spm_space:
             s = s.replace(self.SPM_SPACE, ' ').strip()
         return s
+
+from pathlib import Path
+import openvino as ov
+SPM_TOKEN_MODEL_NAME = "SpmTokenizer.xml"
+class ChineseCharEnglishSpmTokenizer_ov:
+    SPM_SPACE = "▁"
+
+    def __init__(self, dict_path, spm_model, unk="<unk>", space="<space>", ov_core=None, infer_type="bf16"):
+        self.dict = TokenDict(dict_path, unk=unk)
+        self.space = space
+        self.converted_to_ov = False
+        try :
+            if ov_core is None :
+                ov_core = ov.Core()
+            self.ov_path = Path(spm_model)
+            self.ov_path = self.ov_path.parent / "ov_model" / SPM_TOKEN_MODEL_NAME
+            if not self.ov_path.exists() :
+                self.converted_to_ov = True
+            self.ov_dtype = infer_type
+            ov_config = {'INFERENCE_PRECISION_HINT':self.ov_dtype, 'PERFORMANCE_HINT': "LATENCY"}
+            self.sp_ov = ov_core.compile_model(self.ov_path, 'CPU', ov_config)
+            self.using_ov = True
+        except Exception as e:
+            self.using_ov = False
+            self.sp_ov = None
+            self.sp = spm.SentencePieceProcessor()
+            self.sp.Load(spm_model)
+            # print(f"### ov load {self.ov_path} failed, converted_to_ov={self.converted_to_ov}, {e}")
+
+
+    def convert_ov_model(self, texts):
+        from openvino import save_model, convert_model
+
+        class ModelWrapper(torch.nn.Module):
+            def __init__(self, sp):
+                super().__init__()
+                self.sp = sp
+
+            def forward(self, texts):
+                res = self.sp.EncodeAsPieces(texts)
+                return res
+
+        model = ModelWrapper(self.sp)
+        model.eval()
+        # example_inputs = {"feats":feats, "lengths":lengths}
+        print(f"### convert ov model to {self.ov_path}")
+        ov_model = convert_model(model, example_input=texts)
+        save_model(ov_model, self.ov_path)
+
+
+    def tokenize(self, text, replace_punc=True):
+        #if text == "":
+        #    logging.info(f"empty text")
+        text = text.upper()
+        tokens = []
+        if replace_punc:
+            text = re.sub("[，。？！,\.?!]", " ", text)
+        pattern = re.compile(r'([\u3400-\u4dbf\u4e00-\u9fff])')
+        parts = pattern.split(text.strip())
+        parts = [p for p in parts if len(p.strip()) > 0]
+        for part in parts:
+            if pattern.fullmatch(part) is not None:
+                tokens.append(part)
+            else:
+                if self.sp:
+                    for piece in self.sp.EncodeAsPieces(part.strip()):
+                        tokens.append(piece)
+                    if self.converted_to_ov :
+                        self.convert_ov_model(part.strip())
+                else:
+                    for char in part.strip():
+                        tokens.append(char if char != " " else self.space)
+        tokens_id = []
+        for token in tokens:
+            tokens_id.append(self.dict.get(token, self.dict.unk))
+        return tokens, tokens_id
+
+    def detokenize(self, inputs, join_symbol="", replace_spm_space=True):
+        """inputs is ids or tokens, do not need self.sp"""
+        if len(inputs) > 0 and type(inputs[0]) == int:
+            tokens = [self.dict[id] for id in inputs]
+        else:
+            tokens = inputs
+        s = f"{join_symbol}".join(tokens)
+        if replace_spm_space:
+            s = s.replace(self.SPM_SPACE, ' ').strip()
+        return s

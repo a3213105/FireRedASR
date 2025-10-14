@@ -139,6 +139,112 @@ class TransformerDecoder(nn.Module):
             nbest_hyps.append(n_nbest_hyps)
         return nbest_hyps
 
+    def batch_beam_search0(self, encoder_outputs, src_masks,
+                   beam_size=1, nbest=1, decode_max_len=0,
+                   softmax_smoothing=1.0, length_penalty=0.0, eos_penalty=1.0):
+        B = beam_size
+        N, Ti, H = encoder_outputs.size()
+        device = encoder_outputs.device
+        maxlen = decode_max_len if decode_max_len > 0 else Ti
+        assert eos_penalty > 0.0 and eos_penalty <= 1.0
+
+        # Init
+        encoder_outputs = encoder_outputs.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, Ti, H)
+        src_mask = src_masks.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, -1, Ti)
+        ys = torch.ones(N*B, 1).fill_(self.sos_id).long().to(device)
+        caches: List[Optional[Tensor]] = []
+        for _ in range(self.n_layers):
+            caches.append(None)
+        scores = torch.tensor([0.0] + [-self.INF]*(B-1)).float().to(device)
+        scores = scores.repeat(N).view(N*B, 1)
+        is_finished = torch.zeros_like(scores)
+
+        # Autoregressive Prediction
+        for t in range(maxlen):
+            tgt_mask = self.ignored_target_position_is_0(ys, self.pad_id)
+
+            dec_output = self.dropout(
+                self.tgt_word_emb(ys) * self.scale +
+                self.positional_encoding(ys))
+
+            i = 0
+            for dec_layer in self.layer_stack:
+                dec_output = dec_layer.forward(
+                    dec_output, encoder_outputs,
+                    tgt_mask, src_mask,
+                    cache=caches[i])
+                caches[i] = dec_output
+                i += 1
+
+            dec_output = self.layer_norm_out(dec_output)
+
+            t_logit = self.tgt_word_prj(dec_output[:, -1])
+            t_scores = F.log_softmax(t_logit / softmax_smoothing, dim=-1)
+
+            if eos_penalty != 1.0:
+                t_scores[:, self.eos_id] *= eos_penalty
+
+            t_topB_scores, t_topB_ys = torch.topk(t_scores, k=B, dim=1)
+            t_topB_scores = self.set_finished_beam_score_to_zero(t_topB_scores, is_finished)
+            t_topB_ys = self.set_finished_beam_y_to_eos(t_topB_ys, is_finished)
+
+            # Accumulated
+            scores = scores + t_topB_scores
+
+            # Pruning
+            scores = scores.view(N, B*B)
+            scores, topB_score_ids = torch.topk(scores, k=B, dim=1)
+            scores = scores.view(-1, 1)
+
+            topB_row_number_in_each_B_rows_of_ys = torch.div(topB_score_ids, B).view(N*B)
+            stride = B * torch.arange(N).view(N, 1).repeat(1, B).view(N*B).to(device)
+            topB_row_number_in_ys = topB_row_number_in_each_B_rows_of_ys.long() + stride.long()
+
+            # Update ys
+            ys = ys[topB_row_number_in_ys]
+            t_ys = torch.gather(t_topB_ys.view(N, B*B), dim=1, index=topB_score_ids).view(N*B, 1)
+            ys = torch.cat((ys, t_ys), dim=1)
+
+            # Update caches
+            new_caches: List[Optional[Tensor]] = []
+            for cache in caches:
+                if cache is not None:
+                    new_caches.append(cache[topB_row_number_in_ys])
+            caches = new_caches
+
+            # Update finished state
+            is_finished = t_ys.eq(self.eos_id)
+            if is_finished.sum().item() == N*B:
+                break
+
+        # Length penalty (follow GNMT)
+        scores = scores.view(N, B)
+        ys = ys.view(N, B, -1)
+        ys_lengths = self.get_ys_lengths(ys)
+        if length_penalty > 0.0:
+            penalty = torch.pow((5+ys_lengths.float())/(5.0+1), length_penalty)
+            scores /= penalty
+        nbest_scores, nbest_ids = torch.topk(scores, k=int(nbest), dim=1)
+        nbest_scores = -1.0 * nbest_scores
+        index = nbest_ids + B * torch.arange(N).view(N, 1).to(device).long()
+        nbest_ys = ys.view(N*B, -1)[index.view(-1)]
+        nbest_ys = nbest_ys.view(N, nbest_ids.size(1), -1)
+        nbest_ys_lengths = ys_lengths.view(N*B)[index.view(-1)].view(N, -1)
+        
+        return nbest_scores, nbest_ys, nbest_ys_lengths
+
+    def batch_beam_search_2_list(self, N, nbest_scores, nbest_ys, nbest_ys_lengths):
+        nbest_hyps: List[List[Dict[str, Tensor]]] = []
+        for n in range(N):
+            n_nbest_hyps: List[Dict[str, Tensor]] = []
+            for i, score in enumerate(nbest_scores[n]):
+                new_hyp = {
+                    "yseq": nbest_ys[n, i, 1:nbest_ys_lengths[n, i]]
+                }
+                n_nbest_hyps.append(new_hyp)
+            nbest_hyps.append(n_nbest_hyps)
+        return nbest_hyps
+
     def ignored_target_position_is_0(self, padded_targets, ignore_id):
         mask = torch.ne(padded_targets, ignore_id)
         mask = mask.unsqueeze(dim=1)
