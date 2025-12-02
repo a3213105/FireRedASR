@@ -25,10 +25,10 @@ test_case = [["tor", "ch"],
              ["f16", "f32"], ["f16", "bf16"], ["f16", "f16"],
             ]
 # test_case = [["tor", "ch"], ["f32", "f32"]]
-test_case = [["bf16", "bf16"]]
+test_case = [["bf16", "bf16"], ["f16", "f16"]]
 for enc_type, dec_type in test_case:
     model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", 
-                                       enc_type=enc_type, dec_type=dec_type, cache_size=50)
+                                       enc_type=enc_type, dec_type=dec_type, cache_size=10)
     models.append([model, f"{enc_type}-{dec_type}"])
 
 segments = inputs['gpu_meta']['vad_results']['segments']
@@ -38,7 +38,8 @@ max_rss = 0
 max_vms = 0
 for model, typename in models:
     total_rtf = 0.0
-    for i in range(len(segments)):
+    count = 10 #len(segments)
+    for i in range(10):
         batch_uttid = segments[i]['segment_wav_id']
         # start_time = float(segments[i]['start_time']) * 1000
         # end_time = float(segments[i]['end_time']) * 1000
@@ -86,7 +87,7 @@ for model, typename in models:
         total_rtf += float(results[0]['rtf'])
         # print(f"infer_mode:{typename}\trtf={results[0]['rtf']}")
     
-    total_rtf = total_rtf/len(segments)
+    total_rtf = total_rtf/count
     mem_info = process.memory_info()
     rss = mem_info.rss / 1024 ** 3
     vms = mem_info.vms / 1024 ** 3
@@ -94,5 +95,5 @@ for model, typename in models:
         max_rss = rss
     if max_vms < vms :
         max_vms = vms
-    print(f"RSS: {rss:.2f} GB, VMS: {vms:.2f} GB, Max RSS: {max_rss:.2f} GB, Max VMS: {max_vms:.2f} GB, total_rtf={total_rtf}")  # 虚拟内存
+    print(f"RSS: {rss:.2f} GB, VMS: {vms:.2f} GB, Max RSS: {max_rss:.2f} GB, Max VMS: {max_vms:.2f} GB, total_rtf={total_rtf:.2f}")  # 虚拟内存
     # print(f"tid:{i} {batch_uttid}\tsimilarity:{similarity_output}\trtf:{rtf_output}", flush=True)
