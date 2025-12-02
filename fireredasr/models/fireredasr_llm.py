@@ -521,7 +521,6 @@ class FireRedAsr_LLM_ov(GenerationMixin) :
         # Run inference
         self.request.start_async(inputs, share_inputs=True)
         self.request.wait()
-        logits = self.request.get_tensor("logits").data
         logits = torch.from_numpy(self.request.get_tensor("logits").data).float()
         past_key_values = ((),)
         self._past_length += inputs["inputs_embeds"].shape[1]

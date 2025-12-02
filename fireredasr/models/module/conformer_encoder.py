@@ -21,6 +21,7 @@ class ConformerEncoder(nn.Module):
                         dropout_rate, kernel_size)
             self.layer_stack.append(block)
 
+    @torch.inference_mode()
     def forward(self, padded_input, input_lengths, pad=True):
         if pad:
             padded_input = F.pad(padded_input,
