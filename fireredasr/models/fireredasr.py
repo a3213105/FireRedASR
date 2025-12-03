@@ -8,24 +8,29 @@ from fireredasr.models.fireredasr_aed import FireRedAsrAed_ov, FireRedAsrAed
 from fireredasr.models.fireredasr_llm import FireRedAsrLlm, FireRedAsrLlm_ov
 from fireredasr.tokenizer.aed_tokenizer import ChineseCharEnglishSpmTokenizer
 from fireredasr.tokenizer.llm_tokenizer import LlmTokenizerWrapper
-import cpuinfo
+
+def check_amx():
+    flags = []
+    with open("/proc/cpuinfo") as f:
+        for line in f:
+            if line.startswith("flags"):
+                flags = line.split(":")[1].strip().split()
+                break
+    if 'amx_bf16' in flags:
+        return True
+    return False
 
 
 class FireRedAsr:
     @classmethod
-    def from_pretrained(cls, asr_type, model_dir, enc_type, dec_type, cache_size=0):
+    def from_pretrained(cls, asr_type, model_dir, enc_type, dec_type, cache_size=1024):
         assert asr_type in ["aed", "llm"]
 
         cmvn_path = os.path.join(model_dir, "cmvn.ark")
         feat_extractor = ASRFeatExtractor(cmvn_path)
 
-        info = cpuinfo.get_cpu_info()
-        if 'amx_bf16' in info['flags']:
-            if cache_size == 0:
-                cache_size = 200
-        else :
-            cache_size = 1
-            
+        if not check_amx():
+            cache_size = 0
 
         if asr_type == "aed":
             model_path = os.path.join(model_dir, "model.pth.tar")

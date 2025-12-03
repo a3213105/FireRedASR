@@ -19,6 +19,8 @@ batch_wav_path = ["examples/wav/BAC009S0764W0121.wav"]
 # batch_wav_path = ["examples/wav/7184a192e882c87276778a96423a29c6_2.080.wav"]
 batch_wav_path = ["examples/wav/7184a192e882c87276778a96423a29c6_835.655.wav"]
 batch_wav_path = ["tests/7184a192e882c87276778a96423a29c6_393.625.wav"]
+batch_wav_path = ["/home/sgui/test_fixed.wav"]
+batch_wav_path = ["/home/sgui/50.wav"]
 
 duration_list = [4.2, 1.99, 1.8, 12.37, 27.26]
 results_list = ["甚至出现交易几乎停滞的情况", 
@@ -29,20 +31,27 @@ results_list = ["甚至出现交易几乎停滞的情况",
 
 # FireRedASR-AED
 models=[]
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="tor", dec_type="ch")
-models.append([model, "torch"])
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="f32")
-models.append([model, "f32-f32"])
+# model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="tor", dec_type="ch")
+# models.append([model, "torch"])
+# model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="f32")
+# models.append([model, "f32-f32"])
 model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="bf16")
 models.append([model, "f32-bf16"])
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="f16")
-models.append([model, "f32-f16"])
+# model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="f16")
+# models.append([model, "f32-f16"])
+
+mem = psutil.virtual_memory()
+total = mem.total / 1024 ** 3
+print(f"总内存: {total:.2f} GB")
+
+max_rss = 0
+max_vms = 0
 process = psutil.Process(os.getpid())
-memory_info = process.memory_info()
-rss_mb = memory_info.rss / (1024 * 1024)
-vms_mb = memory_info.vms / (1024 * 1024)
-print(f"RSS (常驻内存集): {rss_mb} MB")
-print(f"VMS (虚拟内存集): {vms_mb} MB")
+mem_info = process.memory_info()
+rss = mem_info.rss / 1024 ** 3
+vms = mem_info.vms / 1024 ** 3
+print(f"Init RSS: {rss:.2f} GB, VMS: {vms:.2f} GB, {rss / total * 100:.2f}%")
+
 
 texts = []
 for i, (model, typename) in enumerate(models):   
@@ -67,11 +76,10 @@ for i, (model, typename) in enumerate(models):
     print(f"infer_mode({i}):{typename}\trtf={results[0]['rtf']}, results= {results[0]['text']}")
     texts.append([results[0]['text'], results[0]['rtf']])
 
-memory_info = process.memory_info()
-rss_mb = memory_info.rss / (1024 * 1024)
-vms_mb = memory_info.vms / (1024 * 1024)
-print(f"RSS (常驻内存集): {rss_mb} MB")
-print(f"VMS (虚拟内存集): {vms_mb} MB")
+mem_info = process.memory_info()
+rss = mem_info.rss / 1024 ** 3
+vms = mem_info.vms / 1024 ** 3
+print(f"RSS: {rss:.2f} GB, VMS: {vms:.2f} GB, {rss / total * 100:.2f}%")
 
 import difflib
 for i, (_, typename) in enumerate(models):   

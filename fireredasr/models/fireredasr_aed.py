@@ -202,7 +202,9 @@ class FireRedAsrAed_ov :
             if self.ov_core is None :
                 self.ov_core = ov.Core()
             cache_size_str = f"{cache_size}"
+            print(f"cache_size_str={cache_size_str}")
             self.ov_core.set_property("CPU", {"CPU_RUNTIME_CACHE_CAPACITY": cache_size_str})
+            # self.ov_core.set_property("CPU", {"ENABLE_MMAP": False})
             ov_config = {'INFERENCE_PRECISION_HINT': self.enc_type, 'PERFORMANCE_HINT': "LATENCY"}
             self.ov_encoder_model = self.ov_core.compile_model(self.ov_encoder_path, 'CPU', ov_config)
             ov_config = {'INFERENCE_PRECISION_HINT': self.dec_type, 'PERFORMANCE_HINT': "LATENCY"}
@@ -218,7 +220,6 @@ class FireRedAsrAed_ov :
         return ys_lengths.int()
 
     def batch_beam_search_for0(self, ys, tgt_mask, encoder_outputs, src_mask) :
-        # print(f"batch_beam_search_for0 ys:{ys.shape}, tgt_mask:{tgt_mask.shape}, encoder_outputs:{encoder_outputs.shape}, src_mask:{src_mask.shape}")
         dec_output = self.torch_model.decoder.tgt_word_emb(ys) * self.torch_model.decoder.scale + self.torch_model.decoder.positional_encoding(ys)
         new_caches: List[Optional[Tensor]] = []
         for i, dec_layer in enumerate(self.torch_model.decoder.layer_stack):
@@ -233,9 +234,6 @@ class FireRedAsrAed_ov :
         return t_logit, new_caches
 
     def batch_beam_search_for1(self, ys, tgt_mask, encoder_outputs, src_mask, caches) :
-        # print(f"batch_beam_search_for1 ys:{ys.shape}, tgt_mask:{tgt_mask.shape}, "
-        #       f"encoder_outputs:{encoder_outputs.shape}, src_mask:{src_mask.shape}, "
-        #       f"caches={len(caches)}, caches0={caches[0].shape}")
         dec_output = self.torch_model.decoder.tgt_word_emb(ys) * self.torch_model.decoder.scale + self.torch_model.decoder.positional_encoding(ys)
         new_caches: List[Optional[Tensor]] = []
         for i, dec_layer in enumerate(self.torch_model.decoder.layer_stack):
@@ -384,23 +382,20 @@ class FireRedAsrAed_ov :
     def batch_beam_search_for0_ov(self, ys, encoder_outputs, src_mask, scores, is_finished,
                                   softmax_smoothing, eos_penalty, B, N) :
         res = self.ov_decoder0_model((ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N),
-                                     share_inputs = True)
+                                     share_inputs = False)
         # print(f"res = {len(res)}, {res}")
         # t_scores = torch.from_numpy(res[0])
         new_caches = []
         for i in range(3, len(res)):
-            # print(f"res0[{i}] shape = {res[i].shape}")
             new_caches.append(res[i])
         return res[0], res[1], res[2], new_caches
 
     def batch_beam_search_for1_ov(self, ys, encoder_outputs, src_mask, scores, is_finished,
                                   softmax_smoothing, eos_penalty, B, N, caches) :
         res = self.ov_decoder1_model((ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N, *caches),
-                                     share_inputs = True)
-        # t_scores = torch.from_numpy(res[0])
+                                     share_inputs = False)
         new_caches = []
         for i in range(3, len(res)):
-            # print(f"res0[{i}] shape = {res[i].shape}")
             new_caches.append(res[i])
         return res[0], res[1], res[2], new_caches
 
@@ -421,8 +416,9 @@ class FireRedAsrAed_ov :
         scores = scores.repeat(N).view(N*B, 1)
         is_finished = torch.zeros_like(scores)
 
-        t_ys, scores, ys, caches = self.batch_beam_search_for0_ov(ys, encoder_outputs, src_mask, scores, is_finished,
-                                                softmax_smoothing, eos_penalty, B, N)
+        t_ys, scores, ys, caches = self.batch_beam_search_for0_ov(ys, encoder_outputs,
+                                            src_mask, scores, is_finished, softmax_smoothing,
+                                            eos_penalty, B, N)
         t_ys = torch.from_numpy(t_ys)
         # Update finished state
         is_finished = t_ys.eq(self.eos_id)
@@ -469,10 +465,10 @@ class FireRedAsrAed_ov :
     def transcribe0(self, padded_input, input_lengths,
                    beam_size, nbest, decode_max_len,
                    softmax_smoothing, length_penalty, eos_penalty):
-        if self.converted_to_ov :
-            self.convert_ov_model(padded_input, input_lengths, beam_size, nbest, decode_max_len,
-                softmax_smoothing, length_penalty, eos_penalty)
-            self.load_ov_model()
+        # if self.converted_to_ov :
+        #     self.convert_ov_model(padded_input, input_lengths, beam_size, nbest, decode_max_len,
+        #         softmax_smoothing, length_penalty, eos_penalty)
+        #     self.load_ov_model()
 
         # print(f"inputs shape: padded_input:{padded_input.shape}, input_lengths:{input_lengths.shape}")
         inputs = (padded_input, input_lengths)
