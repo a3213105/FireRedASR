@@ -11,7 +11,7 @@ import gc
 
 check_mem=False
 sample_type=2
-test_type=0
+test_type=5
 
 def load_dir(directory):
     segments = []
@@ -81,7 +81,7 @@ models=[]
 # test_case = [["tor", "ch"], ["f32", "f32"]]
 # test_case = [["bf16", "bf16"], ["f16", "f16"]]
 if test_type==0:
-    test_case = [["bf16", "bf16"]]
+    test_case = [[0, "bf16", "bf16"],[1, "bf16", "bf16"],[2, "bf16", "bf16"]]
 elif test_type==1:
     test_case = [["bf16", "bf16"], ["f16", "f16"]]
 elif test_type==2:
@@ -90,11 +90,17 @@ elif test_type==3:
     test_case = [["f32", "f32"], ["bf16", "bf16"], ["f16", "f16"]]
 elif test_type==4:
     test_case = [["tor", "ch"], ["f32", "f32"], ["bf16", "bf16"], ["f16", "f16"]]
+elif test_type==5:
+    test_case = [[0, "tor", "ch"],
+                 [0, "f32", "f32"],[1, "f32", "f32"],[2, "f32", "f32"],
+                 [0, "bf16", "bf16"],[1, "bf16", "bf16"],[2, "bf16", "bf16"],
+                 [0, "f16", "f16"],[1, "f16", "f16"],[2, "f16", "f16"]]
 
-for enc_type, dec_type in test_case:
+for implement_type, enc_type, dec_type in test_case:
     model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", 
+                                       implement_type=implement_type,
                                        enc_type=enc_type, dec_type=dec_type)
-    models.append([model, f"{enc_type}-{dec_type}"])
+    models.append([model, f"{implement_type}-{enc_type}-{dec_type}"])
 
 if check_mem:
     mem = psutil.virtual_memory()
@@ -159,4 +165,4 @@ for j in range(1):
                     f"batch_wav_path={batch_wav_path}"
                     )
         total_rtf = total_rtf/count
-        print(f"total_rtf={total_rtf:.2f} @ {count}")  
+        print(f"{typename}, total_rtf={total_rtf:.2f} @ {count}")  

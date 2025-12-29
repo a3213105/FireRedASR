@@ -3,7 +3,7 @@ import time
 import torch
 
 from fireredasr.data.asr_feat import ASRFeatExtractor
-from fireredasr.models.fireredasr_aed import FireRedAsrAed_ov2 as FireRedAsrAed_ov, FireRedAsrAed
+from fireredasr.models.fireredasr_aed import FireRedAsrAed_ov, FireRedAsrAed_ov1, FireRedAsrAed_ov2, FireRedAsrAed
 from fireredasr.models.fireredasr_llm import FireRedAsrLlm, FireRedAsrLlm_ov
 from fireredasr.tokenizer.aed_tokenizer import ChineseCharEnglishSpmTokenizer
 from fireredasr.tokenizer.llm_tokenizer import LlmTokenizerWrapper
@@ -22,7 +22,7 @@ def check_amx():
 
 class FireRedAsr:
     @classmethod
-    def from_pretrained(cls, asr_type, model_dir, enc_type, dec_type, cache_size=1024):
+    def from_pretrained(cls, asr_type, model_dir, implement_type, enc_type, dec_type, cache_size=1024):
         assert asr_type in ["aed", "llm"]
 
         cmvn_path = os.path.join(model_dir, "cmvn.ark")
@@ -35,7 +35,7 @@ class FireRedAsr:
             model_path = os.path.join(model_dir, "model.pth.tar")
             dict_path =os.path.join(model_dir, "dict.txt")
             spm_model = os.path.join(model_dir, "train_bpe1000.model")
-            model = load_fireredasr_aed_model(model_path, enc_type, dec_type, cache_size)
+            model = load_fireredasr_aed_model(model_path, implement_type, enc_type, dec_type, cache_size)
             tokenizer = ChineseCharEnglishSpmTokenizer(dict_path, spm_model)
         elif asr_type == "llm":
             model_path = os.path.join(model_dir, "model.pth.tar")
@@ -115,8 +115,13 @@ class FireRedAsr:
             return results
 
 
-def load_fireredasr_aed_model(model_path, enc_type, dec_type, cache_size):
-    model_ov = FireRedAsrAed_ov(None, None, model_path, enc_type, dec_type, cache_size)
+def load_fireredasr_aed_model(model_path, implement_type, enc_type, dec_type, cache_size):
+    if implement_type == 0 :
+        model_ov = FireRedAsrAed_ov(None, None, model_path, enc_type, dec_type, cache_size)
+    elif implement_type == 1:
+        model_ov = FireRedAsrAed_ov1(None, None, model_path, enc_type, dec_type, cache_size)
+    else :
+        model_ov = FireRedAsrAed_ov2(None, None, model_path, enc_type, dec_type, cache_size)
     if not model_ov.using_ov:
         package = torch.load(model_path, map_location=lambda storage, loc: storage, weights_only=False)
         model = FireRedAsrAed.from_args(package["args"])

@@ -31,10 +31,27 @@ results_list = ["甚至出现交易几乎停滞的情况",
 models=[]
 # model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="tor", dec_type="ch")
 # models.append([model, "torch"])
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="f32")
-models.append([model, "f32-f32"])
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="bf16", dec_type="bf16")
-models.append([model, "bf16-bf16"])
+model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
+                                   implement_type=0, enc_type="f32", dec_type="f32")
+models.append([model, "0-f32-f32"])
+model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
+                                   implement_type=1, enc_type="f32", dec_type="f32")
+models.append([model, "1-f32-f32"])
+model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
+                                   implement_type=2, enc_type="f32", dec_type="f32")
+models.append([model, "2-f32-f32"])
+
+model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
+                                   implement_type=0, enc_type="bf16", dec_type="bf16")
+models.append([model, "0-bf16-bf16"])
+model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
+                                   implement_type=1, enc_type="bf16", dec_type="bf16")
+models.append([model, "1-bf16-bf16"])
+model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
+                                   implement_type=2, enc_type="bf16", dec_type="bf16")
+models.append([model, "2-bf16-bf16"])
+# model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="bf16", dec_type="bf16")
+# models.append([model, "bf16-bf16"])
 # model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="f16")
 # models.append([model, "f32-f16"])
 

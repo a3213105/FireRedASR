@@ -30,16 +30,16 @@ class FireRedAsrAed(torch.nn.Module):
     def transcribe(self, padded_input, input_lengths,
                    beam_size=1, nbest=1, decode_max_len=0,
                    softmax_smoothing=1.0, length_penalty=0.0, eos_penalty=1.0):
-        t0 = time.perf_counter()
+        # t0 = time.perf_counter()
         enc_outputs, _, enc_mask = self.encoder(padded_input, input_lengths)
-        t1 = time.perf_counter()
+        # t1 = time.perf_counter()
         nbest_hyps = self.decoder.batch_beam_search(
             enc_outputs, enc_mask,
             beam_size, nbest, decode_max_len,
             softmax_smoothing, length_penalty, eos_penalty)
-        t2 = time.perf_counter()
-        print(f"### enc:{t1-t0:.5f}, dec:{t2-t1:.5f}, "
-              f"{nbest_hyps[0][0]['yseq'].shape}")
+        # t2 = time.perf_counter()
+        # print(f"### enc:{t1-t0:.5f}, dec:{t2-t1:.5f}, "
+        #       f"{nbest_hyps[0][0]['yseq'].shape}")
         return nbest_hyps
     
     def encode(self, padded_input, input_lengths):
@@ -430,38 +430,47 @@ class FireRedAsrAed_ov :
                    beam_size, nbest, decode_max_len,
                    softmax_smoothing, length_penalty, eos_penalty):
         B = beam_size
-        N, Ti, H = encoder_outputs.size()
-        device = encoder_outputs.device
+        N, Ti, H = encoder_outputs.shape
+        # device = encoder_outputs.device
         maxlen = decode_max_len if decode_max_len > 0 else Ti
         assert eos_penalty > 0.0 and eos_penalty <= 1.0
 
         # Init
-        encoder_outputs = encoder_outputs.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, Ti, H)
-        src_mask = src_masks.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, -1, Ti)
-        ys = torch.ones(N*B, 1).fill_(self.sos_id).long().to(device)
-        scores = torch.tensor([0.0] + [-self.INF]*(B-1)).float().to(device)
-        scores = scores.repeat(N).view(N*B, 1)
-        is_finished = torch.zeros_like(scores)
+        encoder_outputs = np.repeat(np.expand_dims(encoder_outputs, axis=1), repeats=B, axis=1).reshape(N * B, Ti, H)
+        src_mask = np.repeat(np.expand_dims(src_masks, axis=1), repeats=B, axis=1).reshape(N * B, -1, Ti)   
+        ys = np.full((N * B, 1), fill_value=self.sos_id, dtype=np.int64)
+        t_ys = ys
+        scores = np.tile(np.array([0.0] + [-self.INF] * (B - 1), dtype=np.float32), reps=N).reshape(N * B, 1)
+        is_finished = np.zeros_like(scores, dtype=np.float32)
 
-        t_ys, scores, ys, caches = self.batch_beam_search_for0_ov(ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N)
+        # encoder_outputs = encoder_outputs.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, Ti, H)
+        # src_mask = src_masks.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, -1, Ti)
+        # ys = torch.ones(N*B, 1).fill_(self.sos_id).long()
+        # scores = torch.tensor([0.0] + [-self.INF]*(B-1)).float()
+        # scores = scores.repeat(N).view(N*B, 1)
+        # is_finished = torch.zeros_like(scores)
+
+        t_ys, scores, ys, caches = self.batch_beam_search_for0_ov(ys, encoder_outputs, src_mask,
+                                                                  scores, is_finished, softmax_smoothing,
+                                                                  eos_penalty, B, N)
         t_ys = torch.from_numpy(t_ys)
         # Update finished state
         is_finished = t_ys.eq(self.eos_id)
         if is_finished.sum().item() != N*B:
             # Autoregressive Prediction
             for t in range(1, maxlen):
-                t_ys, scores, ys, caches = self.batch_beam_search_for1_ov(ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N, caches)
+                t_ys, scores, ys, caches = self.batch_beam_search_for1_ov(ys, encoder_outputs, src_mask,
+                                                                          scores, is_finished,
+                                                                          softmax_smoothing, eos_penalty,
+                                                                          B, N, caches)
                 t_ys = torch.from_numpy(t_ys)
                 # Update finished state
                 is_finished = t_ys.eq(self.eos_id)
                 if is_finished.sum().item() == N*B:
                     break
-        # print(f"caches={caches[0][0].shape}")
         scores = torch.from_numpy(scores.data)
         ys = torch.from_numpy(ys.data)
-        # scores = torch.from_numpy(scores)
-        # ys = torch.from_numpy(ys)
-        # Length penalty (follow GNMT)
+
         scores = scores.view(N, B)
         ys = ys.view(N, B, -1)
         ys_lengths = self.get_ys_lengths(ys)
@@ -470,7 +479,7 @@ class FireRedAsrAed_ov :
             scores /= penalty
         nbest_scores, nbest_ids = torch.topk(scores, k=int(nbest), dim=1)
         nbest_scores = -1.0 * nbest_scores
-        index = nbest_ids + B * torch.arange(N).view(N, 1).to(device).long()
+        index = nbest_ids + B * torch.arange(N).view(N, 1).long()
         nbest_ys = ys.view(N*B, -1)[index.view(-1)]
         nbest_ys = nbest_ys.view(N, nbest_ids.size(1), -1)
         nbest_ys_lengths = ys_lengths.view(N*B)[index.view(-1)].view(N, -1)
@@ -498,22 +507,22 @@ class FireRedAsrAed_ov :
         #     self.load_ov_model()
 
         # print(f"inputs shape: padded_input:{padded_input.shape}, input_lengths:{input_lengths.shape}")
-        t0 = time.perf_counter()
+        # t0 = time.perf_counter()
         inputs = (padded_input, input_lengths)
         self.enc_request.start_async(inputs, share_inputs=True)
         self.enc_request.wait()
-        t1 = time.perf_counter()
+        # t1 = time.perf_counter()
         # enc_outputs = torch.from_numpy(self.enc_request.get_output_tensor(0).data)
         # enc_mask = torch.from_numpy(self.enc_request.get_output_tensor(1).data)
         enc_outputs = self.enc_request.get_output_tensor(0).data
         enc_mask = self.enc_request.get_output_tensor(1).data
         nbest_hyps = self.batch_beam_search1(enc_outputs, enc_mask, beam_size, nbest,decode_max_len, softmax_smoothing, length_penalty, eos_penalty)
-        t2 = time.perf_counter()
-        steps= nbest_hyps[0][0]['yseq'].shape[0]
-        enc_t = t1-t0
-        dec_t = t2-t1
-        print(f"### model input:{padded_input.shape[1]}, "
-              f"enc:{enc_t:.4f}, dec:{dec_t:.4f}, {dec_t/steps:.4f}, {steps}")
+        # t2 = time.perf_counter()
+        # steps= nbest_hyps[0][0]['yseq'].shape[0]
+        # enc_t = t1-t0
+        # dec_t = t2-t1
+        # print(f"### model input:{padded_input.shape[1]}, "
+        #       f"enc:{enc_t:.4f}, dec:{dec_t:.4f}, {dec_t/steps:.4f}, {steps}")
         return nbest_hyps
 
     @torch.inference_mode()
@@ -797,15 +806,18 @@ class FireRedAsrAed_ov1(FireRedAsrAed_ov) :
     def __init__(self, args, ov_core, model_path, enc_type, dec_type, cache_size):
         ov_path = Path(model_path)
         self.init_params(args, ov_core, ov_path)
-        self.ov_encoder_path = ov_path.parent / "ov_model" / FireRedAsrAed_Encoder_MODEL_NAME
-        self.ov_decoder_path = ov_path.parent / "ov_model" / FireRedAsrAed_Decoder_MODEL_NAME
-        if not self.ov_encoder_path.exists() or not self.ov_decoder_path.exists():
-            self.converted_to_ov = True
+        self.init_model_path(ov_path)
         self.enc_type = enc_type
         self.dec_type = dec_type
         if self.enc_type in "f32f16bf16" and self.dec_type in "f32f16bf16" :
             self.load_ov_model(cache_size)
 
+    def init_model_path(self, ov_path):
+        self.ov_encoder_path = ov_path.parent / "ov_model_v1" / FireRedAsrAed_Encoder_MODEL_NAME
+        self.ov_decoder_path = ov_path.parent / "ov_model_v1" / FireRedAsrAed_Decoder_MODEL_NAME
+        if not self.ov_encoder_path.exists() or not self.ov_decoder_path.exists():
+            self.converted_to_ov = True
+        
     def load_ov_model(self, cache_size):
         try :
             if self.ov_core is None :
@@ -835,69 +847,16 @@ class FireRedAsrAed_ov1(FireRedAsrAed_ov) :
         new_scores = self.dec_request.get_tensor("new_scores").data
         return topB_row_number_in_ys, new_t_ys, new_scores
 
-    def batch_beam_search1(self, encoder_outputs, src_masks,
-                   beam_size, nbest, decode_max_len,
-                   softmax_smoothing, length_penalty, eos_penalty):
-        B = beam_size
-        N, Ti, H = encoder_outputs.shape
-        maxlen = decode_max_len if decode_max_len > 0 else Ti
-
-        # Init       
-        encoder_outputs = np.repeat(np.expand_dims(encoder_outputs, axis=1), repeats=B, axis=1).reshape(N * B, Ti, H)
-        src_mask = np.repeat(np.expand_dims(src_masks, axis=1), repeats=B, axis=1).reshape(N * B, -1, Ti)   
-        ys = np.full((N * B, 1), fill_value=self.sos_id, dtype=np.int64)
-        t_ys = ys
-        scores = np.tile(np.array([0.0] + [-self.INF] * (B - 1), dtype=np.float32), reps=N).reshape(N * B, 1)
-        is_finished = np.zeros_like(scores, dtype=np.float32)
-
-        self.dec_request.reset_state()
-        self.next_beam_idx = np.arange(B, dtype=int)
-        for t in range(maxlen):
-            topB_row_number_in_ys, t_ys, scores = self.batch_beam_search_for_ov(t_ys, scores, encoder_outputs,
-                                                    src_mask, softmax_smoothing, eos_penalty, is_finished, B, N)
-            ys = ys[topB_row_number_in_ys]
-            ys = np.concatenate((ys, t_ys), axis=1)
-            is_finished = (t_ys == self.eos_id) 
-            if int(is_finished.sum()) == N * B:
-                break
-        # Length penalty (follow GNMT)
-        scores = torch.from_numpy(scores)
-        ys = torch.from_numpy(ys)
-        scores = scores.view(N, B)
-        ys = ys.view(N, B, -1)
-        ys_lengths = self.get_ys_lengths(ys)
-        if length_penalty > 0.0:
-            penalty = torch.pow((5+ys_lengths.float())/(5.0+1), length_penalty)
-            scores /= penalty
-        nbest_scores, nbest_ids = torch.topk(scores, k=int(nbest), dim=1)
-        nbest_scores = -1.0 * nbest_scores
-        index = nbest_ids + B * torch.arange(N).view(N, 1).long()
-        nbest_ys = ys.view(N*B, -1)[index.view(-1)]
-        nbest_ys = nbest_ys.view(N, nbest_ids.size(1), -1)
-        nbest_ys_lengths = ys_lengths.view(N*B)[index.view(-1)].view(N, -1)
-
-        # result
-        nbest_hyps: List[List[Dict[str, Tensor]]] = []
-        for n in range(N):
-            n_nbest_hyps: List[Dict[str, Tensor]] = []
-            for i, score in enumerate(nbest_scores[n]):
-                new_hyp = {
-                    "yseq": nbest_ys[n, i, 1:nbest_ys_lengths[n, i]]
-                }
-                n_nbest_hyps.append(new_hyp)
-            nbest_hyps.append(n_nbest_hyps)
-        return nbest_hyps
-
     def transcribe0(self, padded_input, input_lengths,
                    beam_size, nbest, decode_max_len,
                    softmax_smoothing, length_penalty, eos_penalty):
         # print(f"inputs shape: padded_input:{padded_input.shape}, input_lengths:{input_lengths.shape}")
-        t0 = time.perf_counter()
+        # t0 = time.perf_counter()
         inputs = (padded_input, input_lengths)
         self.enc_request.start_async(inputs, share_inputs=True)
         self.dec_request.reset_state()
         self.enc_request.wait()
-        t1 = time.perf_counter()
+        # t1 = time.perf_counter()
 
         encoder_outputs = self.enc_request.get_output_tensor(0).data
         src_masks = self.enc_request.get_output_tensor(1).data
@@ -950,14 +909,13 @@ class FireRedAsrAed_ov1(FireRedAsrAed_ov) :
                 n_nbest_hyps.append(new_hyp)
             nbest_hyps.append(n_nbest_hyps)
         return nbest_hyps
-
-        t2 = time.perf_counter()
-        steps= nbest_hyps[0][0]['yseq'].shape[0]
-        enc_t = t1-t0
-        dec_t = t2-t1
-        print(f"### model input:{padded_input.shape[1]}, "
-              f"enc:{enc_t:.4f}, dec:{dec_t:.4f}, {dec_t/steps:.4f}, {steps}")
-        return nbest_hyps
+        # t2 = time.perf_counter()
+        # steps= nbest_hyps[0][0]['yseq'].shape[0]
+        # enc_t = t1-t0
+        # dec_t = t2-t1
+        # print(f"### model input:{padded_input.shape[1]}, "
+        #       f"enc:{enc_t:.4f}, dec:{dec_t:.4f}, {dec_t/steps:.4f}, {steps}")
+        # return nbest_hyps
 
     def convert_ov_model(self, feats, lengths, beam_size, nbest, decode_max_len,
                    softmax_smoothing, length_penalty, eos_penalty):
@@ -1067,27 +1025,116 @@ class FireRedAsrAed_ov2(FireRedAsrAed_ov1) :
     def __init__(self, args, ov_core, model_path, enc_type, dec_type, cache_size):
         super().__init__(args, ov_core, model_path, enc_type, dec_type, cache_size)
 
-    def batch_beam_search_for_ov(self, scores, t_ys, encoder_outputs, src_mask, 
+    def init_model_path(self, ov_path):
+        self.ov_encoder_path = ov_path.parent / "ov_model_v2" / FireRedAsrAed_Encoder_MODEL_NAME
+        self.ov_decoder_path = ov_path.parent / "ov_model_v2" / FireRedAsrAed_Decoder_MODEL_NAME
+        if not self.ov_encoder_path.exists() or not self.ov_decoder_path.exists():
+            self.converted_to_ov = True
+
+    def batch_beam_search_for_ov(self, scores, scores_mask, t_ys, encoder_outputs, src_mask, 
                                  softmax_smoothing, eos_penalty, is_finished, B, N) :
         inputs = {"t_ys" : t_ys, "encoder_outputs" : encoder_outputs, "src_mask" : src_mask,
                   "softmax_smoothing": softmax_smoothing, "eos_penalty": eos_penalty,
-                  "is_finished": is_finished, "B" : B, "N" : N, #   "scores" : scores,
+                  "is_finished": is_finished, "B" : B, "N" : N, "scores" : scores,
+                  "scores_mask" : scores_mask,
                   "beam_idx" : self.next_beam_idx}
         print(f"t_ys={t_ys.shape}, encoder_outputs={encoder_outputs.shape}, "
               f"src_mask={src_mask.shape}, softmax_smoothing={softmax_smoothing.shape}, "
               f"eos_penalty={eos_penalty.shape}, is_finished={is_finished.shape}, "
               f"B={B}, N={N}, beam_idx={self.next_beam_idx.shape}")
-        self.dec_request.start_async(inputs, share_inputs=True)
+        self.dec_request.start_async({"t_ys" : t_ys, "encoder_outputs" : encoder_outputs, "src_mask" : src_mask,
+                  "softmax_smoothing": softmax_smoothing, "eos_penalty": eos_penalty,
+                  "is_finished": is_finished, "B" : B, "N" : N, "scores" : scores,
+                  "scores_mask" : scores_mask,
+                  "beam_idx" : self.next_beam_idx}, share_inputs=True)
         self.dec_request.wait()
         # topB_row_number_in_ys = torch.from_numpy(self.dec_request.get_tensor("topB_row_number_in_ys").data).long()
         # new_t_ys = torch.from_numpy(self.dec_request.get_tensor("new_t_ys").data).float()
         # new_scores = torch.from_numpy(self.dec_request.get_tensor("new_scores").data).float()
         topB_row_number_in_ys = self.dec_request.get_tensor("topB_row_number_in_ys").data
         new_t_ys = self.dec_request.get_tensor("new_t_ys").data
-        return topB_row_number_in_ys, new_t_ys
+        return self.dec_request.get_tensor("topB_row_number_in_ys").data, self.dec_request.get_tensor("new_t_ys").data
         # new_scores = self.dec_request.get_tensor("new_scores").data
         # return topB_row_number_in_ys, new_t_ys, new_scores
-  
+
+    def transcribe0(self, padded_input, input_lengths,
+                   beam_size, nbest, decode_max_len,
+                   softmax_smoothing, length_penalty, eos_penalty):
+        # print(f"inputs shape: padded_input:{padded_input.shape}, input_lengths:{input_lengths.shape}")
+        # t0 = time.perf_counter()
+        inputs = (padded_input, input_lengths)
+        self.enc_request.start_async(inputs, share_inputs=True)
+        self.dec_request.reset_state()
+        self.enc_request.wait()
+        # t1 = time.perf_counter()
+
+        encoder_outputs = self.enc_request.get_output_tensor(0).data
+        src_masks = self.enc_request.get_output_tensor(1).data
+
+        B = beam_size
+        N, Ti, H = encoder_outputs.shape
+        maxlen = decode_max_len if decode_max_len > 0 else Ti
+
+        # Init       
+        encoder_outputs = np.repeat(np.expand_dims(encoder_outputs, axis=1), repeats=B, axis=1).reshape(N * B, Ti, H)
+        src_mask = np.repeat(np.expand_dims(src_masks, axis=1), repeats=B, axis=1).reshape(N * B, -1, Ti)   
+        ys = np.full((N * B, 1), fill_value=self.sos_id, dtype=np.int64)
+        t_ys = ys
+        scores = np.tile(np.array([0.0] + [-self.INF] * (B - 1), dtype=np.float32), reps=N).reshape(N * B, 1)
+        is_finished = np.zeros_like(scores, dtype=np.float32)
+        scores_mask = scores
+        self.next_beam_idx = np.arange(B, dtype=int)
+        for t in range(maxlen):
+            self.dec_request.start_async({"t_ys" : t_ys, "encoder_outputs" : encoder_outputs,
+                                          "src_mask" : src_mask, "softmax_smoothing": softmax_smoothing,
+                                          "eos_penalty": eos_penalty, "is_finished": is_finished,
+                                          "B" : B, "N" : N, "scores" : scores, "scores_mask" : scores_mask,
+                                          "beam_idx" : self.next_beam_idx},
+                                         share_inputs=True)
+            self.dec_request.wait()
+            topB_row_number_in_ys = self.dec_request.get_tensor("topB_row_number_in_ys").data
+            t_ys = self.dec_request.get_tensor("new_t_ys").data
+            scores = self.dec_request.get_tensor("new_scores").data
+            ys = ys[topB_row_number_in_ys]
+            ys = np.concatenate((ys, t_ys), axis=1)
+            is_finished = (t_ys == self.eos_id) 
+            if int(is_finished.sum()) == N * B:
+                break
+
+        # Length penalty (follow GNMT)
+        scores = torch.from_numpy(scores)
+        ys = torch.from_numpy(ys)
+        scores = scores.view(N, B)
+        ys = ys.view(N, B, -1)
+        ys_lengths = self.get_ys_lengths(ys)
+        if length_penalty > 0.0:
+            penalty = torch.pow((5+ys_lengths.float())/(5.0+1), length_penalty)
+            scores /= penalty
+        nbest_scores, nbest_ids = torch.topk(scores, k=int(nbest), dim=1)
+        nbest_scores = -1.0 * nbest_scores
+        index = nbest_ids + B * torch.arange(N).view(N, 1).long()
+        nbest_ys = ys.view(N*B, -1)[index.view(-1)]
+        nbest_ys = nbest_ys.view(N, nbest_ids.size(1), -1)
+        nbest_ys_lengths = ys_lengths.view(N*B)[index.view(-1)].view(N, -1)
+
+        # result
+        nbest_hyps: List[List[Dict[str, Tensor]]] = []
+        for n in range(N):
+            n_nbest_hyps: List[Dict[str, Tensor]] = []
+            for i, score in enumerate(nbest_scores[n]):
+                new_hyp = {
+                    "yseq": nbest_ys[n, i, 1:nbest_ys_lengths[n, i]]
+                }
+                n_nbest_hyps.append(new_hyp)
+            nbest_hyps.append(n_nbest_hyps)
+        # t2 = time.perf_counter()
+        # steps= nbest_hyps[0][0]['yseq'].shape[0]
+        # enc_t = t1-t0
+        # dec_t = t2-t1
+        # print(f"### model input:{padded_input.shape[1]}, "
+        #       f"enc:{enc_t:.4f}, dec:{dec_t:.4f}, {dec_t/steps:.4f}, {steps}")
+        return nbest_hyps
+
     def convert_ov_model(self, feats, lengths, beam_size, nbest, decode_max_len,
                    softmax_smoothing, length_penalty, eos_penalty):
         
@@ -1133,7 +1180,7 @@ class FireRedAsrAed_ov2(FireRedAsrAed_ov1) :
                     self.model = model.eval()
 
                 def forward(self, t_ys, encoder_outputs, src_mask, softmax_smoothing, eos_penalty,
-                            is_finished, B, N, scores_mask, scores, caches):
+                            is_finished, B, N, scores, scores_mask, caches):
                     with torch.no_grad():
                         topB_row_number_in_ys, t_ys, scores, caches = self.model.decoder.infer_decoder0(t_ys, 
                                             encoder_outputs, src_mask, scores_mask, caches, scores,
@@ -1156,15 +1203,15 @@ class FireRedAsrAed_ov2(FireRedAsrAed_ov1) :
             t_ys = torch.ones(N*B, 1).fill_(self.sos_id).long()
             scores = torch.tensor([0.0] + [-self.INF]*(B-1)).float()
             scores = scores.repeat(N).view(N*B, 1)
+            scores_mask = scores
             is_finished = torch.zeros_like(scores)
             N = torch.tensor(N).long()
             B = torch.tensor(B).long()
 
             caches = []
-
             input_names = ["t_ys", "encoder_outputs", "src_mask", "softmax_smoothing",
-                           "eos_penalty", "is_finished", "B", "N", "scores_mask", "key_values.scores"]
-            output_names = ["topB_row_number_in_ys", "new_t_ys", "present.new_scores"]
+                           "eos_penalty", "is_finished", "B", "N", "scores", "scores_mask"]
+            output_names = ["topB_row_number_in_ys", "new_t_ys", "new_scores"]
 
             for i in range(cache_size):
                 cache = torch.randn(cache_shape)
@@ -1174,8 +1221,8 @@ class FireRedAsrAed_ov2(FireRedAsrAed_ov1) :
 
             example_input = {"t_ys":t_ys, "encoder_outputs": encoder_outputs, "src_mask": src_mask,
                              "softmax_smoothing": softmax_smoothing, "eos_penalty": eos_penalty,
-                             "is_finished":is_finished,"B": B, "N": N, "scores_mask": scores,
-                             "scores": scores, "caches": caches}
+                             "is_finished":is_finished, "B": B, "N": N, "scores": scores,
+                             "scores_mask": scores_mask, "caches": caches}
                 
             ov_model = ov.convert_model(decoder_model, example_input=example_input)
             
@@ -1185,7 +1232,7 @@ class FireRedAsrAed_ov2(FireRedAsrAed_ov1) :
             for output, output_name in zip(ov_model.outputs, output_names):
                 output.get_tensor().set_names({output_name})
 
-            patch_stateful(ov_model, 9, 2)
+            patch_stateful(ov_model, 10, 3)
             print("✅ ModelDecoder model successfully converted")
 
             ov.save_model(ov_model, self.ov_decoder_path, compress_to_fp16=False)
