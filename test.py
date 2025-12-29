@@ -19,8 +19,6 @@ batch_wav_path = ["examples/wav/BAC009S0764W0121.wav"]
 # batch_wav_path = ["examples/wav/7184a192e882c87276778a96423a29c6_2.080.wav"]
 batch_wav_path = ["examples/wav/7184a192e882c87276778a96423a29c6_835.655.wav"]
 batch_wav_path = ["tests/7184a192e882c87276778a96423a29c6_393.625.wav"]
-batch_wav_path = ["/home/sgui/test_fixed.wav"]
-batch_wav_path = ["/home/sgui/50.wav"]
 
 duration_list = [4.2, 1.99, 1.8, 12.37, 27.26]
 results_list = ["甚至出现交易几乎停滞的情况", 
@@ -33,10 +31,10 @@ results_list = ["甚至出现交易几乎停滞的情况",
 models=[]
 # model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="tor", dec_type="ch")
 # models.append([model, "torch"])
-# model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="f32")
-# models.append([model, "f32-f32"])
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="bf16")
-models.append([model, "f32-bf16"])
+model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="f32")
+models.append([model, "f32-f32"])
+model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="bf16", dec_type="bf16")
+models.append([model, "bf16-bf16"])
 # model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="f16")
 # models.append([model, "f32-f16"])
 

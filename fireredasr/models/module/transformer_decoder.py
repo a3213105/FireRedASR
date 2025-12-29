@@ -35,6 +35,81 @@ class TransformerDecoder(nn.Module):
         self.tgt_word_prj.weight = self.tgt_word_emb.weight
         self.scale = (d_model ** 0.5)
 
+    def infer_decoder(self, t_ys, encoder_outputs, src_mask, caches, scores,
+                      softmax_smoothing, eos_penalty, is_finished, B, N):
+        t = 0 if caches[0] is None else caches[0].shape[1]
+        if isinstance(caches, tuple):
+            caches = list(caches)
+
+        tgt_mask = torch.ne(t_ys, self.pad_id).to(torch.uint8).expand(-1, t+1).unsqueeze(dim=1)
+        dec_output = self.tgt_word_emb(t_ys) * self.scale + self.positional_encoding.forward1(t)
+        for i, dec_layer in enumerate(self.layer_stack):
+            dec_output, new_cache = dec_layer.forward000(
+                dec_output, encoder_outputs, tgt_mask, src_mask,
+                cache=caches[i])
+            caches[i] = new_cache
+        dec_output = self.layer_norm_out(dec_output)
+        t_logit = self.tgt_word_prj(dec_output[:, -1])
+        t_scores = F.log_softmax(t_logit / softmax_smoothing, dim=-1)
+        if eos_penalty != 1.0:
+            t_scores[:, self.eos_id] *= eos_penalty
+        t_topB_scores, t_topB_ys = torch.topk(t_scores, k=B, dim=1)
+        t_topB_scores = self.set_finished_beam_score_to_zero(t_topB_scores, is_finished)
+        t_topB_ys = self.set_finished_beam_y_to_eos(t_topB_ys, is_finished)
+
+        if scores is None :
+            scores = np.tile(np.array([0.0] + [-self.INF] * (B - 1), dtype=np.float32), reps=N).reshape(N * B, 1)
+        t_topB_scores += scores
+        t_topB_scores = t_topB_scores.view(N, B*B)
+        t_topB_scores, topB_score_ids = torch.topk(t_topB_scores, k=B, dim=1)
+        t_topB_scores = t_topB_scores.view(-1, 1)
+        topB_row_number_in_ys = torch.div(topB_score_ids, B).view(N*B).long()
+        # stride = B * torch.arange(N).view(N, 1).repeat(1, B).view(N*B).long()
+        t_ys = torch.gather(t_topB_ys.view(N, B*B), dim=1, index=topB_score_ids).view(N*B, 1)
+        # print(f"### stride({stride.shape})={stride}, topB_row_number_in_ys={topB_row_number_in_ys}")
+        # topB_row_number_in_ys += stride
+        for i, new_cache in enumerate(caches):
+            caches[i] = new_cache[topB_row_number_in_ys]
+        scores = t_topB_scores
+        return topB_row_number_in_ys, t_ys, scores, caches
+    
+    def infer_decoder0(self, t_ys, encoder_outputs, src_mask, scores_mask, caches, scores,
+                      softmax_smoothing, eos_penalty, is_finished, B, N):
+        t = 0 if caches[0] is None else caches[0].shape[1]
+        if isinstance(caches, tuple):
+            caches = list(caches)
+
+        tgt_mask = torch.ne(t_ys, self.pad_id).to(torch.uint8).expand(-1, t+1).unsqueeze(dim=1)
+        dec_output = self.tgt_word_emb(t_ys) * self.scale + self.positional_encoding.forward1(t)
+        for i, dec_layer in enumerate(self.layer_stack):
+            dec_output, new_cache = dec_layer.forward000(
+                dec_output, encoder_outputs, tgt_mask, src_mask,
+                cache=caches[i])
+            caches[i] = new_cache
+        dec_output = self.layer_norm_out(dec_output)
+        t_logit = self.tgt_word_prj(dec_output[:, -1])
+        t_scores = F.log_softmax(t_logit / softmax_smoothing, dim=-1)
+        if eos_penalty != 1.0:
+            t_scores[:, self.eos_id] *= eos_penalty
+        t_topB_scores, t_topB_ys = torch.topk(t_scores, k=B, dim=1)
+        t_topB_scores = self.set_finished_beam_score_to_zero1(scores_mask, t_topB_scores, is_finished)
+        t_topB_ys = self.set_finished_beam_y_to_eos(t_topB_ys, is_finished)
+
+        if scores is None :
+            scores = np.tile(np.array([0.0] + [-self.INF] * (B - 1), dtype=np.float32), reps=N).reshape(N * B, 1)
+        t_topB_scores += scores
+        t_topB_scores = t_topB_scores.view(N, B*B)
+        t_topB_scores, topB_score_ids = torch.topk(t_topB_scores, k=B, dim=1)
+        t_topB_scores = t_topB_scores.view(-1, 1)
+        topB_row_number_in_ys = torch.div(topB_score_ids, B).view(N*B).long()
+        t_ys = torch.gather(t_topB_ys.view(N, B*B), dim=1, index=topB_score_ids).view(N*B, 1)
+        # stride = B * torch.arange(N).view(N, 1).repeat(1, B).view(N*B).long()
+        # topB_row_number_in_ys += stride
+        for i, new_cache in enumerate(caches):
+            caches[i] = new_cache[topB_row_number_in_ys]
+        scores = t_topB_scores
+        return topB_row_number_in_ys, t_ys, scores, caches
+
     def batch_beam_search(self, encoder_outputs, src_masks,
                    beam_size, nbest, decode_max_len,
                    softmax_smoothing, length_penalty, eos_penalty):
@@ -55,60 +130,14 @@ class TransformerDecoder(nn.Module):
         scores = scores.repeat(N).view(N*B, 1)
         is_finished = torch.zeros_like(scores)
 
+        t_ys = ys
         # Autoregressive Prediction
         for t in range(maxlen):
-            tgt_mask = self.ignored_target_position_is_0(ys, self.pad_id)
-
-            dec_output = self.dropout(
-                self.tgt_word_emb(ys) * self.scale +
-                self.positional_encoding(ys))
-
-            i = 0
-            for dec_layer in self.layer_stack:
-                dec_output = dec_layer.forward(
-                    dec_output, encoder_outputs,
-                    tgt_mask, src_mask,
-                    cache=caches[i])
-                caches[i] = dec_output
-                i += 1
-
-            dec_output = self.layer_norm_out(dec_output)
-
-            t_logit = self.tgt_word_prj(dec_output[:, -1])
-            t_scores = F.log_softmax(t_logit / softmax_smoothing, dim=-1)
-
-            if eos_penalty != 1.0:
-                t_scores[:, self.eos_id] *= eos_penalty
-
-            t_topB_scores, t_topB_ys = torch.topk(t_scores, k=B, dim=1)
-            t_topB_scores = self.set_finished_beam_score_to_zero(t_topB_scores, is_finished)
-            t_topB_ys = self.set_finished_beam_y_to_eos(t_topB_ys, is_finished)
-
-            # Accumulated
-            scores = scores + t_topB_scores
-
-            # Pruning
-            scores = scores.view(N, B*B)
-            scores, topB_score_ids = torch.topk(scores, k=B, dim=1)
-            scores = scores.view(-1, 1)
-
-            topB_row_number_in_each_B_rows_of_ys = torch.div(topB_score_ids, B).view(N*B)
-            stride = B * torch.arange(N).view(N, 1).repeat(1, B).view(N*B).to(device)
-            topB_row_number_in_ys = topB_row_number_in_each_B_rows_of_ys.long() + stride.long()
-
-            # Update ys
+            topB_row_number_in_ys, t_ys, scores, caches = self.infer_decoder(t_ys, 
+                                            encoder_outputs, src_mask, caches, scores,
+                                            softmax_smoothing, eos_penalty, is_finished, B, N)
             ys = ys[topB_row_number_in_ys]
-            t_ys = torch.gather(t_topB_ys.view(N, B*B), dim=1, index=topB_score_ids).view(N*B, 1)
             ys = torch.cat((ys, t_ys), dim=1)
-
-            # Update caches
-            new_caches: List[Optional[Tensor]] = []
-            for cache in caches:
-                if cache is not None:
-                    new_caches.append(cache[topB_row_number_in_ys])
-            caches = new_caches
-
-            # Update finished state
             is_finished = t_ys.eq(self.eos_id)
             if is_finished.sum().item() == N*B:
                 break
@@ -479,7 +508,7 @@ class TransformerDecoder(nn.Module):
         return t_ys, ys, scores, caches
 
     def ignored_target_position_is_0(self, padded_targets, ignore_id):
-        mask = torch.ne(padded_targets, ignore_id)
+        mask = torch.ne(padded_targets, ignore_id).to(torch.uint8)
         mask = mask.unsqueeze(dim=1)
         T = padded_targets.size(-1)
         upper_tri_0_mask = self.upper_triangular_is_0(T).unsqueeze(0).to(mask.dtype)
@@ -491,11 +520,26 @@ class TransformerDecoder(nn.Module):
         tri_left_ones = torch.tril(ones)
         return tri_left_ones.to(torch.uint8)
 
+    def ignored_target_position_is_1(self, padded_targets, T, ignore_id):
+        mask = torch.ne(padded_targets, ignore_id).to(torch.uint8)
+        mask = mask.unsqueeze(dim=1)
+        upper_tri_0_mask = self.upper_triangular_is_1(T).unsqueeze(0).to(mask.dtype)
+        return mask & upper_tri_0_mask
+
+    def upper_triangular_is_1(self, size):
+        tri_left_ones = torch.ones(1, size)
+        return tri_left_ones.to(torch.uint8)
+
     def set_finished_beam_score_to_zero(self, scores, is_finished):
         NB, B = scores.size()
         is_finished = is_finished.float()
-        mask_score = torch.tensor([0.0] + [-self.INF]*(B-1)).float().to(scores.device)
-        mask_score = mask_score.view(1, B).repeat(NB, 1)
+        mask_score = torch.tensor([0.0] + [-self.INF]*(B-1)).view(1, B).repeat(NB, 1).float().to(scores.device)
+        # mask_score = mask_score.view(1, B).repeat(NB, 1)
+        return scores * (1 - is_finished) + mask_score * is_finished
+
+    def set_finished_beam_score_to_zero1(self, mask_score, scores, is_finished):
+        NB, B = scores.size()
+        is_finished = is_finished.float()
         return scores * (1 - is_finished) + mask_score * is_finished
 
     def set_finished_beam_y_to_eos(self, ys, is_finished):
@@ -503,7 +547,7 @@ class TransformerDecoder(nn.Module):
         return ys * (1 - is_finished) + self.eos_id * is_finished
 
     def get_ys_lengths(self, ys):
-        N, B, Tmax = ys.size()
+        # N, B, Tmax = ys.size()
         ys_lengths = torch.sum(torch.ne(ys, self.eos_id), dim=-1)
         return ys_lengths.int()
 
@@ -591,6 +635,27 @@ class DecoderLayer(nn.Module):
 
         return x
 
+    def forward000(self, dec_input, enc_output, self_attn_mask, cross_attn_mask, cache=None):
+        residual = dec_input
+        xq = self.self_attn_norm(residual)
+        if cache is not None:
+            cache = torch.cat([cache, xq], dim=1)
+            # self_attn_mask = self_attn_mask[:, -1:, :]
+        else:
+            cache = xq
+        x = self.self_attn(xq, cache, cache, mask=self_attn_mask)         
+
+        x = residual + x
+        residual = x
+        x = self.cross_attn_norm(x)
+        x = self.cross_attn(x, enc_output, enc_output, mask=cross_attn_mask)
+
+        x = residual + x
+        residual = x
+        x = self.mlp_norm(x)
+        x = residual + self.mlp(x)
+
+        return x, cache
 
 class DecoderMultiHeadAttention(nn.Module):
     def __init__(self, d_model, n_head, dropout=0.1):
@@ -674,6 +739,9 @@ class PositionalEncoding(nn.Module):
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
+
+    def forward1(self, length):
+        return self.pe[:, length:length+1].clone().detach()
 
     def forward(self, x):
         length = x.size(1)

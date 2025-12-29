@@ -3,6 +3,9 @@ import time
 from fireredasr.models.module.conformer_encoder import ConformerEncoder
 from fireredasr.models.module.transformer_decoder import TransformerDecoder
 import json
+import os
+
+# from memory_profiler import profile
 
 class FireRedAsrAed(torch.nn.Module):
     @classmethod
@@ -27,11 +30,16 @@ class FireRedAsrAed(torch.nn.Module):
     def transcribe(self, padded_input, input_lengths,
                    beam_size=1, nbest=1, decode_max_len=0,
                    softmax_smoothing=1.0, length_penalty=0.0, eos_penalty=1.0):
+        t0 = time.perf_counter()
         enc_outputs, _, enc_mask = self.encoder(padded_input, input_lengths)
+        t1 = time.perf_counter()
         nbest_hyps = self.decoder.batch_beam_search(
             enc_outputs, enc_mask,
             beam_size, nbest, decode_max_len,
             softmax_smoothing, length_penalty, eos_penalty)
+        t2 = time.perf_counter()
+        print(f"### enc:{t1-t0:.5f}, dec:{t2-t1:.5f}, "
+              f"{nbest_hyps[0][0]['yseq'].shape}")
         return nbest_hyps
     
     def encode(self, padded_input, input_lengths):
@@ -170,23 +178,7 @@ FireRedAsrAed_Decoder1_MODEL_NAME = "FireRedASR_AED_decoder1_ov.xml"
 class FireRedAsrAed_ov :
     def __init__(self, args, ov_core, model_path, enc_type, dec_type, cache_size):
         ov_path = Path(model_path)
-        self.ov_config_path = ov_path.parent / "ov_model" / FireRedAsrAed_CONFIG_NAME
-        if args is None :
-            self.load_config()
-        else :
-            self.sos_id = args.sos_id
-            self.eos_id = args.eos_id
-            self.pad_id = args.pad_id
-        # self.n_layers = args.n_layers_dec
-        self.INF = 1e10
-        self.next_beam_idx = None
-        self.infer_mode = 0
-        
-        self.torch_model = None
-        self.converted_to_ov = False
-        self.using_ov = False
-
-        self.ov_core = ov_core
+        self.init_params(args, ov_core, ov_path)
         self.ov_encoder_path = ov_path.parent / "ov_model" / FireRedAsrAed_Encoder_MODEL_NAME
         self.ov_decoder0_path = ov_path.parent / "ov_model" / FireRedAsrAed_Decoder0_MODEL_NAME
         self.ov_decoder1_path = ov_path.parent / "ov_model" / FireRedAsrAed_Decoder1_MODEL_NAME
@@ -197,25 +189,45 @@ class FireRedAsrAed_ov :
         if self.enc_type in "f32f16bf16" and self.dec_type in "f32f16bf16" :
             self.load_ov_model(cache_size)
 
+    def init_params(self, args, ov_core, ov_path) :
+        self.ov_config_path = ov_path.parent / "ov_model" / FireRedAsrAed_CONFIG_NAME
+        self.sos_id = 3
+        self.eos_id = 4
+        self.pad_id = 2
+        if args is None :
+            self.load_config()
+        else :
+            self.sos_id = args.sos_id
+            self.eos_id = args.eos_id
+            self.pad_id = args.pad_id
+        self.INF = 1e10
+        self.next_beam_idx = None
+        self.torch_model = None
+        self.converted_to_ov = False
+        self.using_ov = False
+        self.ov_core = ov_core
+
     def load_ov_model(self, cache_size):
         try :
             if self.ov_core is None :
                 self.ov_core = ov.Core()
             cache_size_str = f"{cache_size}"
-            print(f"cache_size_str={cache_size_str}")
             self.ov_core.set_property("CPU", {"CPU_RUNTIME_CACHE_CAPACITY": cache_size_str})
-            # self.ov_core.set_property("CPU", {"ENABLE_MMAP": False})
-            ov_config = {'INFERENCE_PRECISION_HINT': self.enc_type, 'PERFORMANCE_HINT': "LATENCY"}
+            ov_config = {'INFERENCE_PRECISION_HINT': self.enc_type,'PERFORMANCE_HINT': 'LATENCY',}
             self.ov_encoder_model = self.ov_core.compile_model(self.ov_encoder_path, 'CPU', ov_config)
             ov_config = {'INFERENCE_PRECISION_HINT': self.dec_type, 'PERFORMANCE_HINT': "LATENCY"}
             self.ov_decoder0_model = self.ov_core.compile_model(self.ov_decoder0_path, 'CPU', ov_config)
             self.ov_decoder1_model = self.ov_core.compile_model(self.ov_decoder1_path, 'CPU', ov_config)
+            
+            self.enc_request = self.ov_encoder_model.create_infer_request()
+            self.dec0_request = self.ov_decoder0_model.create_infer_request()
+            self.dec1_request = self.ov_decoder1_model.create_infer_request()
             self.using_ov = True
         except Exception as e:
             print(f"### ov load {self.ov_encoder_path} or {self.ov_decoder0_path} or {self.ov_decoder1_path} failed, {e}")
 
     def get_ys_lengths(self, ys):
-        N, B, Tmax = ys.size()
+        # N, B, Tmax = ys.size()
         ys_lengths = torch.sum(torch.ne(ys, self.eos_id), dim=-1)
         return ys_lengths.int()
 
@@ -261,9 +273,6 @@ class FireRedAsrAed_ov :
         encoder_outputs = encoder_outputs.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, Ti, H)
         src_mask = src_masks.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, -1, Ti)
         ys = torch.ones(N*B, 1).fill_(self.sos_id).long().to(device)
-        # caches: List[Optional[Tensor]] = []
-        # for _ in range(self.n_layers):
-        #     caches.append(None)
         scores = torch.tensor([0.0] + [-self.INF]*(B-1)).float().to(device)
         scores = scores.repeat(N).view(N*B, 1)
         is_finished = torch.zeros_like(scores)
@@ -272,7 +281,6 @@ class FireRedAsrAed_ov :
         tgt_mask = self.torch_model.decoder.ignored_target_position_is_0(ys, self.pad_id)
         
         t_logit, caches = self.batch_beam_search_for0(ys, tgt_mask, encoder_outputs, src_mask)
-        # print(f"softmax_smoothing:{softmax_smoothing}, eos_penalty:{eos_penalty}")
         t_scores = F.log_softmax(t_logit / softmax_smoothing, dim=-1)
 
         if eos_penalty != 1.0:
@@ -381,24 +389,43 @@ class FireRedAsrAed_ov :
     
     def batch_beam_search_for0_ov(self, ys, encoder_outputs, src_mask, scores, is_finished,
                                   softmax_smoothing, eos_penalty, B, N) :
-        res = self.ov_decoder0_model((ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N),
-                                     share_inputs = False)
-        # print(f"res = {len(res)}, {res}")
-        # t_scores = torch.from_numpy(res[0])
+        inputs = (ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N)
+        self.dec0_request.start_async(inputs, share_inputs=True)
+        self.dec0_request.wait()
+        t_ys = self.dec0_request.get_output_tensor(0).data
+        scores = self.dec0_request.get_output_tensor(1)
+        ys = self.dec0_request.get_output_tensor(2)
         new_caches = []
-        for i in range(3, len(res)):
-            new_caches.append(res[i])
-        return res[0], res[1], res[2], new_caches
+        for i in range(3, 19):
+            new_caches.append(self.dec0_request.get_output_tensor(i))
+        return t_ys, scores, ys, new_caches
+
+        # res = self.ov_decoder0_model((ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N), share_inputs = True, share_outputs = True)
+        # new_caches = []
+        # for i in range(3, len(res)):
+        #     new_caches.append(res[i])
+        # return res[0], res[1], res[2], new_caches
 
     def batch_beam_search_for1_ov(self, ys, encoder_outputs, src_mask, scores, is_finished,
                                   softmax_smoothing, eos_penalty, B, N, caches) :
-        res = self.ov_decoder1_model((ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N, *caches),
-                                     share_inputs = False)
+        inputs = (ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N, *caches)
+        self.dec1_request.start_async(inputs, share_inputs=True)
+        self.dec1_request.wait()
+        t_ys = self.dec1_request.get_output_tensor(0).data
+        scores = self.dec1_request.get_output_tensor(1)
+        ys = self.dec1_request.get_output_tensor(2)
         new_caches = []
-        for i in range(3, len(res)):
-            new_caches.append(res[i])
-        return res[0], res[1], res[2], new_caches
+        for i in range(3, 19):
+            new_caches.append(self.dec1_request.get_output_tensor(i))
+        return t_ys, scores, ys, new_caches
 
+        # res = self.ov_decoder1_model((ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N, *caches), share_inputs = True, share_outputs = True)
+        # new_caches = []
+        # for i in range(3, len(res)):
+        #     new_caches.append(res[i])
+        # return res[0], res[1], res[2], new_caches
+
+    # @profile
     def batch_beam_search1(self, encoder_outputs, src_masks,
                    beam_size, nbest, decode_max_len,
                    softmax_smoothing, length_penalty, eos_penalty):
@@ -416,25 +443,24 @@ class FireRedAsrAed_ov :
         scores = scores.repeat(N).view(N*B, 1)
         is_finished = torch.zeros_like(scores)
 
-        t_ys, scores, ys, caches = self.batch_beam_search_for0_ov(ys, encoder_outputs,
-                                            src_mask, scores, is_finished, softmax_smoothing,
-                                            eos_penalty, B, N)
+        t_ys, scores, ys, caches = self.batch_beam_search_for0_ov(ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N)
         t_ys = torch.from_numpy(t_ys)
         # Update finished state
         is_finished = t_ys.eq(self.eos_id)
         if is_finished.sum().item() != N*B:
             # Autoregressive Prediction
             for t in range(1, maxlen):
-                t_ys, scores, ys, caches = self.batch_beam_search_for1_ov(ys, encoder_outputs, src_mask, scores, is_finished,
-                                                             softmax_smoothing, eos_penalty, B, N, caches)
+                t_ys, scores, ys, caches = self.batch_beam_search_for1_ov(ys, encoder_outputs, src_mask, scores, is_finished, softmax_smoothing, eos_penalty, B, N, caches)
                 t_ys = torch.from_numpy(t_ys)
                 # Update finished state
                 is_finished = t_ys.eq(self.eos_id)
                 if is_finished.sum().item() == N*B:
                     break
-
-        scores = torch.from_numpy(scores)
-        ys = torch.from_numpy(ys)
+        # print(f"caches={caches[0][0].shape}")
+        scores = torch.from_numpy(scores.data)
+        ys = torch.from_numpy(ys.data)
+        # scores = torch.from_numpy(scores)
+        # ys = torch.from_numpy(ys)
         # Length penalty (follow GNMT)
         scores = scores.view(N, B)
         ys = ys.view(N, B, -1)
@@ -461,7 +487,8 @@ class FireRedAsrAed_ov :
             nbest_hyps.append(n_nbest_hyps)
         return nbest_hyps
 
-    @torch.inference_mode()
+    # @torch.inference_mode()
+    # @profile
     def transcribe0(self, padded_input, input_lengths,
                    beam_size, nbest, decode_max_len,
                    softmax_smoothing, length_penalty, eos_penalty):
@@ -471,12 +498,22 @@ class FireRedAsrAed_ov :
         #     self.load_ov_model()
 
         # print(f"inputs shape: padded_input:{padded_input.shape}, input_lengths:{input_lengths.shape}")
+        t0 = time.perf_counter()
         inputs = (padded_input, input_lengths)
-        res = self.ov_encoder_model(inputs)
-        enc_outputs = torch.from_numpy(res[0])
-        enc_mask = torch.from_numpy(res[1])
-        nbest_hyps = self.batch_beam_search1(enc_outputs, enc_mask, beam_size, nbest,
-                                decode_max_len, softmax_smoothing, length_penalty, eos_penalty)
+        self.enc_request.start_async(inputs, share_inputs=True)
+        self.enc_request.wait()
+        t1 = time.perf_counter()
+        # enc_outputs = torch.from_numpy(self.enc_request.get_output_tensor(0).data)
+        # enc_mask = torch.from_numpy(self.enc_request.get_output_tensor(1).data)
+        enc_outputs = self.enc_request.get_output_tensor(0).data
+        enc_mask = self.enc_request.get_output_tensor(1).data
+        nbest_hyps = self.batch_beam_search1(enc_outputs, enc_mask, beam_size, nbest,decode_max_len, softmax_smoothing, length_penalty, eos_penalty)
+        t2 = time.perf_counter()
+        steps= nbest_hyps[0][0]['yseq'].shape[0]
+        enc_t = t1-t0
+        dec_t = t2-t1
+        print(f"### model input:{padded_input.shape[1]}, "
+              f"enc:{enc_t:.4f}, dec:{dec_t:.4f}, {dec_t/steps:.4f}, {steps}")
         return nbest_hyps
 
     @torch.inference_mode()
@@ -501,35 +538,6 @@ class FireRedAsrAed_ov :
             #         decode_max_len, softmax_smoothing, length_penalty, eos_penalty)
             # return nbest_hyps
 
-    @torch.inference_mode()
-    def transcribe1(self, padded_input, input_lengths,
-                   beam_size, nbest, decode_max_len,
-                   softmax_smoothing, length_penalty, eos_penalty):
-        if self.converted_to_ov :
-            self.convert_ov_model(padded_input, input_lengths, beam_size, nbest, decode_max_len,
-                softmax_smoothing, length_penalty, eos_penalty)
-
-        if self.infer_mode == 0 :
-            enc_outputs, enc_mask = self.torch_model.encode(padded_input, input_lengths)
-            nbest_hyps = self.batch_beam_search(enc_outputs, enc_mask, beam_size, nbest,
-                    decode_max_len, softmax_smoothing, length_penalty, eos_penalty)
-        else :
-            if self.infer_mode < 3 :
-                inputs = (padded_input, input_lengths)
-                res = self.ov_encoder_model(inputs)
-                enc_outputs = torch.from_numpy(res[0])
-                enc_mask = torch.from_numpy(res[1])
-            else :
-                enc_outputs, enc_mask = self.torch_model.encode(padded_input, input_lengths)
-            st1 = time.perf_counter()
-            if self.infer_mode > 1:
-                nbest_hyps = self.batch_beam_search1(enc_outputs, enc_mask, beam_size, nbest,
-                                        decode_max_len, softmax_smoothing, length_penalty, eos_penalty)
-            else :
-                nbest_hyps = self.batch_beam_search(enc_outputs, enc_mask, beam_size, nbest,
-                                        decode_max_len, softmax_smoothing, length_penalty, eos_penalty)
-        return nbest_hyps
-
     def eval(self):
         if self.torch_model is not None :
             self.torch_model.eval()  
@@ -540,13 +548,17 @@ class FireRedAsrAed_ov :
 
     def load_config(self):
         # print(f"Load model config from {self.ov_config_path}")
-        with open(self.ov_config_path, 'r') as file:
-            data = json.load(file)
-            self.sos_id = data["sos_id"]
-            self.eos_id = data["eos_id"]
-            self.pad_id = data["pad_id"]
-            return True
-        return False
+        try :
+            with open(self.ov_config_path, 'r') as file:
+                data = json.load(file)
+                self.sos_id = data["sos_id"]
+                self.eos_id = data["eos_id"]
+                self.pad_id = data["pad_id"]
+                return True
+        except :
+            print(f"{self.ov_config_path} is not existed")
+        finally:
+            return False
 
     @torch.inference_mode()
     def convert_ov_model(self, feats, lengths, beam_size, nbest, decode_max_len,
@@ -572,70 +584,6 @@ class FireRedAsrAed_ov :
             cleanup_torchscript_cache()
 
         enc_outputs, enc_mask = encoder_model(feats, lengths)
-
-        # if not self.ov_decoder_path.exists() :
-        #     class ModelDecoderWrapper(torch.nn.Module):
-        #         def __init__(self, model):
-        #             super().__init__()
-        #             self.model = model.eval()
-
-        #         def forward(self, encoder_outputs, src_mask, ys, B, N, is_finished, scores, softmax_smoothing, caches):
-        #             with torch.no_grad():
-        #                 t_ys, ys, scores, caches = self.model.decoder.decoder2(encoder_outputs, src_mask,
-        #                                                     ys, B, N, is_finished, scores, caches, softmax_smoothing, 1.0)
-        #             return t_ys, ys, scores, caches
-
-        #     decoder_model = ModelDecoderWrapper(self.torch_model)
-        #     decoder_model.eval()
-        #     beam_size=3
-        #     num = 2
-        #     cache_size = 16
-            
-        #     B = beam_size
-        #     N, Ti, H = enc_outputs.size()
-        #     cache_shape = (B*N, num, 1280)
-
-        #     encoder_outputs = enc_outputs.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, Ti, H)
-        #     src_mask = enc_mask.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, -1, Ti)
-        #     ys = torch.ones(N*B, 1).fill_(self.sos_id).long()
-        #     scores = torch.tensor([0.0] + [-self.INF]*(B-1)).float()
-        #     scores = scores.repeat(N).view(N*B, 1)
-        #     is_finished = torch.zeros_like(scores)
- 
-        #     B = torch.tensor(B).long()
-        #     N = torch.tensor(N).long()
-        #     softmax_smoothing = torch.tensor(softmax_smoothing).float()
-
-        #     caches: List[Optional[Tensor]] = []
-        #     input_names = ["encoder_outputs", "src_mask", "ys", "B", "N", "is_finished", "scores", "softmax_smoothing"]
-        #     output_names = ["t_ys", "ys", "scores"]
-        #     input_len = len(input_names)
-        #     output_len = len(output_names)
-        #     for i in range(cache_size):
-        #         cache = torch.randn(cache_shape)
-        #         caches.append(cache)
-        #         input_names.extend([f"key_values.{i}"])
-        #         output_names.extend([f"present.{i}"])
-
-        #     example_input = {"encoder_outputs": encoder_outputs, "src_mask": src_mask,  "ys":ys,
-        #                      "B": B, "N": N,  "is_finished":is_finished, "scores":scores,
-        #                      "softmax_smoothing": softmax_smoothing, "caches": caches}
-                
-        #     ov_model = ov.convert_model(decoder_model, example_input=example_input)
-            
-        #     for input, input_name in zip(ov_model.inputs, input_names):
-        #         input.get_tensor().set_names({input_name})
-
-        #     for output, output_name in zip(ov_model.outputs, output_names):
-        #         output.get_tensor().set_names({output_name})
-
-        #     patch_stateful(ov_model, input_len, output_len)
-        #     print("✅ Language model successfully converted")
-
-        #     ov.save_model(ov_model, self.ov_decoder_path, compress_to_fp16=False)
-        #     del ov_model
-        #     cleanup_torchscript_cache()
-        #     print(f"✅ ModelDecoder completed {self.ov_decoder_path}")
 
         if not self.ov_decoder0_path.exists() :
             class ModelDecoder0Wrapper(torch.nn.Module):
@@ -844,3 +792,403 @@ class FireRedAsrAed_ov :
             }
             json.dump(data, file, indent=2)
             print(f"✅ Save model config to {self.ov_config_path}")
+
+class FireRedAsrAed_ov1(FireRedAsrAed_ov) :
+    def __init__(self, args, ov_core, model_path, enc_type, dec_type, cache_size):
+        ov_path = Path(model_path)
+        self.init_params(args, ov_core, ov_path)
+        self.ov_encoder_path = ov_path.parent / "ov_model" / FireRedAsrAed_Encoder_MODEL_NAME
+        self.ov_decoder_path = ov_path.parent / "ov_model" / FireRedAsrAed_Decoder_MODEL_NAME
+        if not self.ov_encoder_path.exists() or not self.ov_decoder_path.exists():
+            self.converted_to_ov = True
+        self.enc_type = enc_type
+        self.dec_type = dec_type
+        if self.enc_type in "f32f16bf16" and self.dec_type in "f32f16bf16" :
+            self.load_ov_model(cache_size)
+
+    def load_ov_model(self, cache_size):
+        try :
+            if self.ov_core is None :
+                self.ov_core = ov.Core()
+            cache_size_str = f"{cache_size}"
+            self.ov_core.set_property("CPU", {"CPU_RUNTIME_CACHE_CAPACITY": cache_size_str})
+            ov_config = {'INFERENCE_PRECISION_HINT': self.enc_type,'PERFORMANCE_HINT': 'LATENCY',}
+            self.ov_encoder_model = self.ov_core.compile_model(self.ov_encoder_path, 'CPU', ov_config)
+            ov_config = {'INFERENCE_PRECISION_HINT': self.dec_type, 'PERFORMANCE_HINT': "LATENCY"}
+            self.ov_decoder_model = self.ov_core.compile_model(self.ov_decoder_path, 'CPU', ov_config)
+            
+            self.enc_request = self.ov_encoder_model.create_infer_request()
+            self.dec_request = self.ov_decoder_model.create_infer_request()
+            self.using_ov = True
+        except Exception as e:
+            print(f"### ov load {self.ov_encoder_path} or {self.ov_decoder_path} failed, {e}")
+
+    def batch_beam_search_for_ov(self, t_ys, scores, encoder_outputs, src_mask, 
+                                 softmax_smoothing, eos_penalty, is_finished, B, N) :
+        self.dec_request.start_async({"t_ys" : t_ys, "encoder_outputs" : encoder_outputs, "src_mask" : src_mask,
+                  "softmax_smoothing": softmax_smoothing, "eos_penalty": eos_penalty,
+                  "is_finished": is_finished, "B" : B, "N" : N, "scores" : scores,
+                  "beam_idx" : self.next_beam_idx}, share_inputs=True)
+        self.dec_request.wait()
+        topB_row_number_in_ys = self.dec_request.get_tensor("topB_row_number_in_ys").data
+        new_t_ys = self.dec_request.get_tensor("new_t_ys").data
+        new_scores = self.dec_request.get_tensor("new_scores").data
+        return topB_row_number_in_ys, new_t_ys, new_scores
+
+    def batch_beam_search1(self, encoder_outputs, src_masks,
+                   beam_size, nbest, decode_max_len,
+                   softmax_smoothing, length_penalty, eos_penalty):
+        B = beam_size
+        N, Ti, H = encoder_outputs.shape
+        maxlen = decode_max_len if decode_max_len > 0 else Ti
+
+        # Init       
+        encoder_outputs = np.repeat(np.expand_dims(encoder_outputs, axis=1), repeats=B, axis=1).reshape(N * B, Ti, H)
+        src_mask = np.repeat(np.expand_dims(src_masks, axis=1), repeats=B, axis=1).reshape(N * B, -1, Ti)   
+        ys = np.full((N * B, 1), fill_value=self.sos_id, dtype=np.int64)
+        t_ys = ys
+        scores = np.tile(np.array([0.0] + [-self.INF] * (B - 1), dtype=np.float32), reps=N).reshape(N * B, 1)
+        is_finished = np.zeros_like(scores, dtype=np.float32)
+
+        self.dec_request.reset_state()
+        self.next_beam_idx = np.arange(B, dtype=int)
+        for t in range(maxlen):
+            topB_row_number_in_ys, t_ys, scores = self.batch_beam_search_for_ov(t_ys, scores, encoder_outputs,
+                                                    src_mask, softmax_smoothing, eos_penalty, is_finished, B, N)
+            ys = ys[topB_row_number_in_ys]
+            ys = np.concatenate((ys, t_ys), axis=1)
+            is_finished = (t_ys == self.eos_id) 
+            if int(is_finished.sum()) == N * B:
+                break
+        # Length penalty (follow GNMT)
+        scores = torch.from_numpy(scores)
+        ys = torch.from_numpy(ys)
+        scores = scores.view(N, B)
+        ys = ys.view(N, B, -1)
+        ys_lengths = self.get_ys_lengths(ys)
+        if length_penalty > 0.0:
+            penalty = torch.pow((5+ys_lengths.float())/(5.0+1), length_penalty)
+            scores /= penalty
+        nbest_scores, nbest_ids = torch.topk(scores, k=int(nbest), dim=1)
+        nbest_scores = -1.0 * nbest_scores
+        index = nbest_ids + B * torch.arange(N).view(N, 1).long()
+        nbest_ys = ys.view(N*B, -1)[index.view(-1)]
+        nbest_ys = nbest_ys.view(N, nbest_ids.size(1), -1)
+        nbest_ys_lengths = ys_lengths.view(N*B)[index.view(-1)].view(N, -1)
+
+        # result
+        nbest_hyps: List[List[Dict[str, Tensor]]] = []
+        for n in range(N):
+            n_nbest_hyps: List[Dict[str, Tensor]] = []
+            for i, score in enumerate(nbest_scores[n]):
+                new_hyp = {
+                    "yseq": nbest_ys[n, i, 1:nbest_ys_lengths[n, i]]
+                }
+                n_nbest_hyps.append(new_hyp)
+            nbest_hyps.append(n_nbest_hyps)
+        return nbest_hyps
+
+    def transcribe0(self, padded_input, input_lengths,
+                   beam_size, nbest, decode_max_len,
+                   softmax_smoothing, length_penalty, eos_penalty):
+        # print(f"inputs shape: padded_input:{padded_input.shape}, input_lengths:{input_lengths.shape}")
+        t0 = time.perf_counter()
+        inputs = (padded_input, input_lengths)
+        self.enc_request.start_async(inputs, share_inputs=True)
+        self.dec_request.reset_state()
+        self.enc_request.wait()
+        t1 = time.perf_counter()
+
+        encoder_outputs = self.enc_request.get_output_tensor(0).data
+        src_masks = self.enc_request.get_output_tensor(1).data
+
+        B = beam_size
+        N, Ti, H = encoder_outputs.shape
+        maxlen = decode_max_len if decode_max_len > 0 else Ti
+
+        # Init       
+        encoder_outputs = np.repeat(np.expand_dims(encoder_outputs, axis=1), repeats=B, axis=1).reshape(N * B, Ti, H)
+        src_mask = np.repeat(np.expand_dims(src_masks, axis=1), repeats=B, axis=1).reshape(N * B, -1, Ti)   
+        ys = np.full((N * B, 1), fill_value=self.sos_id, dtype=np.int64)
+        t_ys = ys
+        scores = np.tile(np.array([0.0] + [-self.INF] * (B - 1), dtype=np.float32), reps=N).reshape(N * B, 1)
+        is_finished = np.zeros_like(scores, dtype=np.float32)
+
+        self.next_beam_idx = np.arange(B, dtype=int)
+        for t in range(maxlen):
+            topB_row_number_in_ys, t_ys, scores = self.batch_beam_search_for_ov(t_ys, scores, encoder_outputs,
+                                                    src_mask, softmax_smoothing, eos_penalty, is_finished, B, N)
+            ys = ys[topB_row_number_in_ys]
+            ys = np.concatenate((ys, t_ys), axis=1)
+            is_finished = (t_ys == self.eos_id) 
+            if int(is_finished.sum()) == N * B:
+                break
+        # Length penalty (follow GNMT)
+        scores = torch.from_numpy(scores)
+        ys = torch.from_numpy(ys)
+        scores = scores.view(N, B)
+        ys = ys.view(N, B, -1)
+        ys_lengths = self.get_ys_lengths(ys)
+        if length_penalty > 0.0:
+            penalty = torch.pow((5+ys_lengths.float())/(5.0+1), length_penalty)
+            scores /= penalty
+        nbest_scores, nbest_ids = torch.topk(scores, k=int(nbest), dim=1)
+        nbest_scores = -1.0 * nbest_scores
+        index = nbest_ids + B * torch.arange(N).view(N, 1).long()
+        nbest_ys = ys.view(N*B, -1)[index.view(-1)]
+        nbest_ys = nbest_ys.view(N, nbest_ids.size(1), -1)
+        nbest_ys_lengths = ys_lengths.view(N*B)[index.view(-1)].view(N, -1)
+
+        # result
+        nbest_hyps: List[List[Dict[str, Tensor]]] = []
+        for n in range(N):
+            n_nbest_hyps: List[Dict[str, Tensor]] = []
+            for i, score in enumerate(nbest_scores[n]):
+                new_hyp = {
+                    "yseq": nbest_ys[n, i, 1:nbest_ys_lengths[n, i]]
+                }
+                n_nbest_hyps.append(new_hyp)
+            nbest_hyps.append(n_nbest_hyps)
+        return nbest_hyps
+
+        t2 = time.perf_counter()
+        steps= nbest_hyps[0][0]['yseq'].shape[0]
+        enc_t = t1-t0
+        dec_t = t2-t1
+        print(f"### model input:{padded_input.shape[1]}, "
+              f"enc:{enc_t:.4f}, dec:{dec_t:.4f}, {dec_t/steps:.4f}, {steps}")
+        return nbest_hyps
+
+    def convert_ov_model(self, feats, lengths, beam_size, nbest, decode_max_len,
+                   softmax_smoothing, length_penalty, eos_penalty):
+        if not os.path.exists(self.ov_config_path):
+            folder_path = os.path.dirname(self.ov_config_path)
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path, exist_ok=True)
+            with open(self.ov_config_path, "w") as file:
+                data = {
+                    "sos_id": self.sos_id,
+                    "eos_id": self.eos_id,
+                    "pad_id": self.pad_id,
+                }
+                json.dump(data, file, indent=2)
+                print(f"✅ Save model config to {self.ov_config_path}")
+
+        class ModelEncoderWrapper(torch.nn.Module):
+            def __init__(self, model):
+                super().__init__()
+                self.model = model.eval()
+
+            def forward(self, feats, lengths):
+                with torch.no_grad():
+                    enc_outputs, _, enc_mask = self.model.encoder(feats, lengths)
+                return enc_outputs, enc_mask
+
+        encoder_model = ModelEncoderWrapper(self.torch_model)
+        encoder_model.eval()
+        if not self.ov_encoder_path.exists() :
+            example_inputs = {"feats":feats, "lengths":lengths}
+            ov_model = convert_model(encoder_model, example_input=example_inputs)
+            save_model(ov_model, self.ov_encoder_path, compress_to_fp16=False)
+            print(f"✅ ModelEncoder completed {self.ov_encoder_path}")
+            del ov_model
+            cleanup_torchscript_cache()
+
+        enc_outputs, enc_mask = encoder_model(feats, lengths)
+
+        if not self.ov_decoder_path.exists() :
+            class ModelDecoderWrapper(torch.nn.Module):
+                def __init__(self, model):
+                    super().__init__()
+                    self.model = model.eval()
+
+                def forward(self, t_ys, encoder_outputs, src_mask, softmax_smoothing, eos_penalty,
+                            is_finished, B, N, scores, caches):
+                    with torch.no_grad():
+                        topB_row_number_in_ys, t_ys, scores, caches = self.model.decoder.infer_decoder(t_ys, 
+                                            encoder_outputs, src_mask, caches, scores,
+                                            softmax_smoothing, eos_penalty, is_finished, B, N)
+                        return topB_row_number_in_ys, t_ys, scores, caches
+
+            decoder_model = ModelDecoderWrapper(self.torch_model)
+            decoder_model.eval()
+
+            beam_size=3
+            num = 2
+            cache_size = 16
+            
+            B = beam_size
+            N, Ti, H = enc_outputs.size()
+            cache_shape = (B*N, num, 1280)
+
+            encoder_outputs = enc_outputs.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, Ti, H)
+            src_mask = enc_mask.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, -1, Ti)
+            t_ys = torch.ones(N*B, 1).fill_(self.sos_id).long()
+            scores = torch.tensor([0.0] + [-self.INF]*(B-1)).float()
+            scores = scores.repeat(N).view(N*B, 1)
+            is_finished = torch.zeros_like(scores)
+            N = torch.tensor(N).long()
+            B = torch.tensor(B).long()
+
+            caches = []
+
+            input_names = ["t_ys", "encoder_outputs", "src_mask", "softmax_smoothing",
+                           "eos_penalty", "is_finished", "B", "N", "scores"]
+            output_names = ["topB_row_number_in_ys", "new_t_ys", "new_scores"]
+
+            for i in range(cache_size):
+                cache = torch.randn(cache_shape)
+                caches.append(cache)
+                input_names.extend([f"key_values.{i}"])
+                output_names.extend([f"present.{i}"])
+
+            example_input = {"t_ys":t_ys, "encoder_outputs": encoder_outputs, "src_mask": src_mask,
+                             "softmax_smoothing": softmax_smoothing, "eos_penalty": eos_penalty,
+                             "is_finished":is_finished,"B": B, "N": N, 
+                             "scores": scores, "caches": caches}
+                
+            ov_model = ov.convert_model(decoder_model, example_input=example_input)
+            
+            for input, input_name in zip(ov_model.inputs, input_names):
+                input.get_tensor().set_names({input_name})
+
+            for output, output_name in zip(ov_model.outputs, output_names):
+                output.get_tensor().set_names({output_name})
+
+            patch_stateful(ov_model, 9, 3)
+            print("✅ ModelDecoder model successfully converted")
+
+            ov.save_model(ov_model, self.ov_decoder_path, compress_to_fp16=False)
+            del ov_model
+            cleanup_torchscript_cache()
+            print(f"✅ ModelDecoder completed {self.ov_decoder_path}")
+
+class FireRedAsrAed_ov2(FireRedAsrAed_ov1) :
+    def __init__(self, args, ov_core, model_path, enc_type, dec_type, cache_size):
+        super().__init__(args, ov_core, model_path, enc_type, dec_type, cache_size)
+
+    def batch_beam_search_for_ov(self, scores, t_ys, encoder_outputs, src_mask, 
+                                 softmax_smoothing, eos_penalty, is_finished, B, N) :
+        inputs = {"t_ys" : t_ys, "encoder_outputs" : encoder_outputs, "src_mask" : src_mask,
+                  "softmax_smoothing": softmax_smoothing, "eos_penalty": eos_penalty,
+                  "is_finished": is_finished, "B" : B, "N" : N, #   "scores" : scores,
+                  "beam_idx" : self.next_beam_idx}
+        print(f"t_ys={t_ys.shape}, encoder_outputs={encoder_outputs.shape}, "
+              f"src_mask={src_mask.shape}, softmax_smoothing={softmax_smoothing.shape}, "
+              f"eos_penalty={eos_penalty.shape}, is_finished={is_finished.shape}, "
+              f"B={B}, N={N}, beam_idx={self.next_beam_idx.shape}")
+        self.dec_request.start_async(inputs, share_inputs=True)
+        self.dec_request.wait()
+        # topB_row_number_in_ys = torch.from_numpy(self.dec_request.get_tensor("topB_row_number_in_ys").data).long()
+        # new_t_ys = torch.from_numpy(self.dec_request.get_tensor("new_t_ys").data).float()
+        # new_scores = torch.from_numpy(self.dec_request.get_tensor("new_scores").data).float()
+        topB_row_number_in_ys = self.dec_request.get_tensor("topB_row_number_in_ys").data
+        new_t_ys = self.dec_request.get_tensor("new_t_ys").data
+        return topB_row_number_in_ys, new_t_ys
+        # new_scores = self.dec_request.get_tensor("new_scores").data
+        # return topB_row_number_in_ys, new_t_ys, new_scores
+  
+    def convert_ov_model(self, feats, lengths, beam_size, nbest, decode_max_len,
+                   softmax_smoothing, length_penalty, eos_penalty):
+        
+        if not os.path.exists(self.ov_config_path):
+            folder_path = os.path.dirname(self.ov_config_path)
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path, exist_ok=True)
+            with open(self.ov_config_path, "w") as file:
+                data = {
+                    "sos_id": self.sos_id,
+                    "eos_id": self.eos_id,
+                    "pad_id": self.pad_id,
+                }
+                json.dump(data, file, indent=2)
+                print(f"✅ Save model config to {self.ov_config_path}")
+
+        class ModelEncoderWrapper(torch.nn.Module):
+            def __init__(self, model):
+                super().__init__()
+                self.model = model.eval()
+
+            def forward(self, feats, lengths):
+                with torch.no_grad():
+                    enc_outputs, _, enc_mask = self.model.encoder(feats, lengths)
+                return enc_outputs, enc_mask
+
+        encoder_model = ModelEncoderWrapper(self.torch_model)
+        encoder_model.eval()
+        if not self.ov_encoder_path.exists() :
+            example_inputs = {"feats":feats, "lengths":lengths}
+            ov_model = convert_model(encoder_model, example_input=example_inputs)
+            save_model(ov_model, self.ov_encoder_path, compress_to_fp16=False)
+            print(f"✅ ModelEncoder completed {self.ov_encoder_path}")
+            del ov_model
+            cleanup_torchscript_cache()
+
+        enc_outputs, enc_mask = encoder_model(feats, lengths)
+
+        if not self.ov_decoder_path.exists() :
+            class ModelDecoderWrapper(torch.nn.Module):
+                def __init__(self, model):
+                    super().__init__()
+                    self.model = model.eval()
+
+                def forward(self, t_ys, encoder_outputs, src_mask, softmax_smoothing, eos_penalty,
+                            is_finished, B, N, scores_mask, scores, caches):
+                    with torch.no_grad():
+                        topB_row_number_in_ys, t_ys, scores, caches = self.model.decoder.infer_decoder0(t_ys, 
+                                            encoder_outputs, src_mask, scores_mask, caches, scores,
+                                            softmax_smoothing, eos_penalty, is_finished, B, N)
+                        return topB_row_number_in_ys, t_ys, scores, caches
+
+            decoder_model = ModelDecoderWrapper(self.torch_model)
+            decoder_model.eval()
+
+            beam_size=3
+            num = 2
+            cache_size = 16
+            
+            B = beam_size
+            N, Ti, H = enc_outputs.size()
+            cache_shape = (B*N, num, 1280)
+
+            encoder_outputs = enc_outputs.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, Ti, H)
+            src_mask = enc_mask.unsqueeze(1).repeat(1, B, 1, 1).view(N*B, -1, Ti)
+            t_ys = torch.ones(N*B, 1).fill_(self.sos_id).long()
+            scores = torch.tensor([0.0] + [-self.INF]*(B-1)).float()
+            scores = scores.repeat(N).view(N*B, 1)
+            is_finished = torch.zeros_like(scores)
+            N = torch.tensor(N).long()
+            B = torch.tensor(B).long()
+
+            caches = []
+
+            input_names = ["t_ys", "encoder_outputs", "src_mask", "softmax_smoothing",
+                           "eos_penalty", "is_finished", "B", "N", "scores_mask", "key_values.scores"]
+            output_names = ["topB_row_number_in_ys", "new_t_ys", "present.new_scores"]
+
+            for i in range(cache_size):
+                cache = torch.randn(cache_shape)
+                caches.append(cache)
+                input_names.extend([f"key_values.{i}"])
+                output_names.extend([f"present.{i}"])
+
+            example_input = {"t_ys":t_ys, "encoder_outputs": encoder_outputs, "src_mask": src_mask,
+                             "softmax_smoothing": softmax_smoothing, "eos_penalty": eos_penalty,
+                             "is_finished":is_finished,"B": B, "N": N, "scores_mask": scores,
+                             "scores": scores, "caches": caches}
+                
+            ov_model = ov.convert_model(decoder_model, example_input=example_input)
+            
+            for input, input_name in zip(ov_model.inputs, input_names):
+                input.get_tensor().set_names({input_name})
+
+            for output, output_name in zip(ov_model.outputs, output_names):
+                output.get_tensor().set_names({output_name})
+
+            patch_stateful(ov_model, 9, 2)
+            print("✅ ModelDecoder model successfully converted")
+
+            ov.save_model(ov_model, self.ov_decoder_path, compress_to_fp16=False)
+            del ov_model
+            cleanup_torchscript_cache()
+            print(f"✅ ModelDecoder completed {self.ov_decoder_path}")

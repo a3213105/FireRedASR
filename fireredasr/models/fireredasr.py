@@ -1,10 +1,9 @@
 import os
 import time
-
 import torch
 
 from fireredasr.data.asr_feat import ASRFeatExtractor
-from fireredasr.models.fireredasr_aed import FireRedAsrAed_ov, FireRedAsrAed
+from fireredasr.models.fireredasr_aed import FireRedAsrAed_ov2 as FireRedAsrAed_ov, FireRedAsrAed
 from fireredasr.models.fireredasr_llm import FireRedAsrLlm, FireRedAsrLlm_ov
 from fireredasr.tokenizer.aed_tokenizer import ChineseCharEnglishSpmTokenizer
 from fireredasr.tokenizer.llm_tokenizer import LlmTokenizerWrapper
@@ -31,7 +30,7 @@ class FireRedAsr:
 
         if not check_amx():
             cache_size = 0
-
+        cache_size = 0
         if asr_type == "aed":
             model_path = os.path.join(model_dir, "model.pth.tar")
             dict_path =os.path.join(model_dir, "dict.txt")
@@ -57,13 +56,9 @@ class FireRedAsr:
     def transcribe(self, batch_uttid, batch_wav_path, args={}):
         feats, lengths, durs = self.feat_extractor(batch_wav_path)
         total_dur = sum(durs)
-        if args.get("use_gpu", False):
-            feats, lengths = feats.cuda(), lengths.cuda()
-            self.model.cuda()
-        else:
-            self.model.cpu()
+        self.model.cpu()
 
-        self.model.infer_mode = args.get("infer_mode", 0)
+        # self.model.infer_mode = args.get("infer_mode", 0)
         if self.asr_type == "aed":
             beam_size = torch.tensor(args.get("beam_size", 1), dtype=torch.int32)
             nbest = torch.tensor(args.get("nbest", 1), dtype=torch.int32)
