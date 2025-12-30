@@ -125,8 +125,10 @@ if check_mem:
 for j in range(1):
     for model, typename in models:
         total_rtf = 0.0
-        count = 10 #len(segments)
-        count = len(segments)
+        total_dur = 0.0
+        total_elapsed = 0.0
+        count = 2 #len(segments)
+        # count = len(segments)
         for i in range(count):
             batch_wav_path = segments[i]
                    
@@ -149,9 +151,11 @@ for j in range(1):
                     "temperature": 1.0
                 }
             )
-            if len(results[0]['text'])==0:
-                print(f"{typename}, {segments[i]}")
+            # if len(results[0]['text'])==0:
+            #     print(f"{typename}, {segments[i]}")
             total_rtf += float(results[0]['rtf'])
+            total_dur += float(results[0]['total_dur'])
+            total_elapsed += float(results[0]['elapsed'])
             if check_mem:
                 mem_info = process.memory_info()
                 rss = mem_info.rss / 1024 ** 3
@@ -165,4 +169,5 @@ for j in range(1):
                     f"batch_wav_path={batch_wav_path}"
                     )
         total_rtf = total_rtf/count
-        print(f"{typename}, total_rtf={total_rtf:.2f} @ {count}")  
+        total_rtf1 = total_elapsed / total_dur
+        print(f"{typename}, total_rtf={total_rtf:.4f}, {total_rtf1:.4f} @ {count}")  

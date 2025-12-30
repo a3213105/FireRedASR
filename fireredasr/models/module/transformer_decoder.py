@@ -110,7 +110,7 @@ class TransformerDecoder(nn.Module):
         scores = t_topB_scores
         return topB_row_number_in_ys, t_ys, scores, caches
 
-    def batch_beam_search(self, encoder_outputs, src_masks,
+    def batch_beam_search1(self, encoder_outputs, src_masks,
                    beam_size, nbest, decode_max_len,
                    softmax_smoothing, length_penalty, eos_penalty):
         B = beam_size
@@ -168,7 +168,7 @@ class TransformerDecoder(nn.Module):
             nbest_hyps.append(n_nbest_hyps)
         return nbest_hyps
 
-    def batch_beam_search0(self, encoder_outputs, src_masks,
+    def batch_beam_search(self, encoder_outputs, src_masks,
                    beam_size=1, nbest=1, decode_max_len=0,
                    softmax_smoothing=1.0, length_penalty=0.0, eos_penalty=1.0):
         B = beam_size
@@ -260,8 +260,18 @@ class TransformerDecoder(nn.Module):
         nbest_ys = ys.view(N*B, -1)[index.view(-1)]
         nbest_ys = nbest_ys.view(N, nbest_ids.size(1), -1)
         nbest_ys_lengths = ys_lengths.view(N*B)[index.view(-1)].view(N, -1)
-        
-        return nbest_scores, nbest_ys, nbest_ys_lengths
+
+        # result
+        nbest_hyps: List[List[Dict[str, Tensor]]] = []
+        for n in range(N):
+            n_nbest_hyps: List[Dict[str, Tensor]] = []
+            for i, score in enumerate(nbest_scores[n]):
+                new_hyp = {
+                    "yseq": nbest_ys[n, i, 1:nbest_ys_lengths[n, i]]
+                }
+                n_nbest_hyps.append(new_hyp)
+            nbest_hyps.append(n_nbest_hyps)
+        return nbest_hyps
 
     def batch_beam_search_2_list(self, N, nbest_scores, nbest_ys, nbest_ys_lengths):
         nbest_hyps: List[List[Dict[str, Tensor]]] = []
@@ -361,12 +371,6 @@ class TransformerDecoder(nn.Module):
         return nbest_hyps
     
     def decoder(self, encoder_outputs, src_mask, ys, caches, softmax_smoothing, eos_penalty):
-        # print(f"### decoder: encoder_outputs.shape={encoder_outputs.shape}, src_mask.shape={src_mask.shape}, "
-        #       f"ys={ys.shape}, softmax_smoothing={softmax_smoothing}, eos_penalty={eos_penalty}, "
-        #       f"sos_id={self.sos_id}, pad_id={self.pad_id}, eos_id={self.eos_id}, caches={len(caches)}, "
-        #       f"caches[0]={caches[0].shape if caches[0] is not None else None}, "
-        #       f"caches[1]={caches[1].shape if caches[1] is not None else None}, "
-        #       f"caches[2]={caches[2].shape if caches[2] is not None else None}, ")
         # Autoregressive Prediction
         tgt_mask = self.ignored_target_position_is_0(ys, self.pad_id)
 

@@ -3,7 +3,7 @@ import time
 import torch
 
 from fireredasr.data.asr_feat import ASRFeatExtractor
-from fireredasr.models.fireredasr_aed import FireRedAsrAed_ov, FireRedAsrAed_ov1, FireRedAsrAed_ov2, FireRedAsrAed
+from fireredasr.models.fireredasr_aed import FireRedAsrAed_ov, FireRedAsrAed_ov1, FireRedAsrAed_ov2, FireRedAsrAed, FireRedAsrAed1
 from fireredasr.models.fireredasr_llm import FireRedAsrLlm, FireRedAsrLlm_ov
 from fireredasr.tokenizer.aed_tokenizer import ChineseCharEnglishSpmTokenizer
 from fireredasr.tokenizer.llm_tokenizer import LlmTokenizerWrapper
@@ -81,7 +81,8 @@ class FireRedAsr:
                 hyp_ids = [int(id) for id in hyp["yseq"].cpu()]
                 text = self.tokenizer.detokenize(hyp_ids)
                 results.append({"uttid": uttid, "text": text, "wav": wav,
-                    "rtf": f"{rtf:.4f}", "elapsed": f"{elapsed:.3f}"})
+                    "rtf": f"{rtf:.4f}", "elapsed": f"{elapsed:.5f}",
+                    "total_dur": f"{total_dur:.5f}", "tokens" : f"{len(hyp_ids)}"})
             return results
 
         elif self.asr_type == "llm":
@@ -124,7 +125,10 @@ def load_fireredasr_aed_model(model_path, implement_type, enc_type, dec_type, ca
         model_ov = FireRedAsrAed_ov2(None, None, model_path, enc_type, dec_type, cache_size)
     if not model_ov.using_ov:
         package = torch.load(model_path, map_location=lambda storage, loc: storage, weights_only=False)
-        model = FireRedAsrAed.from_args(package["args"])
+        if implement_type == 0 :
+            model = FireRedAsrAed.from_args(package["args"])
+        else :
+            model = FireRedAsrAed1.from_args(package["args"])
         model.load_state_dict(package["model_state_dict"], strict=True)
         model.eval()
         model_ov.torch_model = model
