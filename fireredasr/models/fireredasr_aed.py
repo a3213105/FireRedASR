@@ -834,14 +834,15 @@ class FireRedAsrAed_ov :
             cleanup_torchscript_cache()
             print(f"✅ ModelDecoder1 completed {self.ov_decoder1_path}")
             
-        with open(self.ov_config_path, "w") as file:
-            data = {
-                "sos_id": self.sos_id,
-                "eos_id": self.eos_id,
-                "pad_id": self.pad_id,
-            }
-            json.dump(data, file, indent=2)
-            print(f"✅ Save model config to {self.ov_config_path}")
+        if not os.path.exists(self.ov_config_path):
+            with open(self.ov_config_path, "w") as file:
+                data = {
+                    "sos_id": self.sos_id,
+                    "eos_id": self.eos_id,
+                    "pad_id": self.pad_id,
+                }
+                json.dump(data, file, indent=2)
+                print(f"✅ Save model config to {self.ov_config_path}")
 
 class FireRedAsrAed_ov1(FireRedAsrAed_ov) :
     def __init__(self, args, ov_core, model_path, enc_type, dec_type, cache_size):
@@ -870,18 +871,6 @@ class FireRedAsrAed_ov1(FireRedAsrAed_ov) :
             self.using_ov = True
         except Exception as e:
             print(f"### ov load {self.ov_encoder_path} or {self.ov_decoder_path} failed, {e}")
-
-    # def batch_beam_search_for_ov(self, t_ys, scores, encoder_outputs, src_mask, 
-    #                              softmax_smoothing, eos_penalty, is_finished, B, N) :
-    #     self.dec_request.start_async({"t_ys" : t_ys, "encoder_outputs" : encoder_outputs, "src_mask" : src_mask,
-    #               "softmax_smoothing": softmax_smoothing, "eos_penalty": eos_penalty,
-    #               "is_finished": is_finished, "B" : B, "N" : N, "scores" : scores,
-    #               "beam_idx" : self.next_beam_idx}, share_inputs=True)
-    #     self.dec_request.wait()
-    #     topB_row_number_in_ys = self.dec_request.get_tensor("topB_row_number_in_ys").data
-    #     new_t_ys = self.dec_request.get_tensor("new_t_ys").data
-    #     new_scores = self.dec_request.get_tensor("new_scores").data
-    #     return topB_row_number_in_ys, new_t_ys, new_scores
 
     def transcribe0(self, padded_input, input_lengths,
                    beam_size, nbest, decode_max_len,
