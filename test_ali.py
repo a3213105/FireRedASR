@@ -6,12 +6,9 @@ import difflib
 import os
 import psutil
 import glob
+import argparse
 
 import gc
-
-check_mem=False
-sample_type=2
-test_type=5
 
 def load_dir(directory):
     segments = []
@@ -49,9 +46,37 @@ def load_dir1(directory):
     # segments = ["/home/sgui/test_audios/100.wav",]
     return segments
 
-if sample_type==0:
+def str2bool(v):
+    """
+    Converts string to bool type; enables command line 
+    arguments in the format of '--arg1 true --arg2 false'
+    """
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+def get_args_parser():
+    parser = argparse.ArgumentParser('Test FireRedASR', add_help=False)
+    parser.add_argument('--sample', '-s', default=2, type=int, help='input sample Type (0, 1, 2)')
+    parser.add_argument('--implement', '-i', default=2, type=int, help='implement Type (0, 1, 2)')
+    parser.add_argument('--enc', '-e', default='bf16', type=str, help='encoder type: Torch, F32, BF16, F16')
+    parser.add_argument('--dec', '-d', default='bf16', type=str, help='encoder type: Torch, F32, BF16, F16')
+    parser.add_argument('--warmup', '-w', default=1, type=int, help='warmup iterations')
+    parser.add_argument('--loop', '-l', default=0, type=int, help='loop iterations')
+    parser.add_argument('--check_mem', '-m', type=str2bool, default=False, help="Check memory usage")
+    return parser
+
+parser = get_args_parser()
+args = parser.parse_args()
+
+if args.sample==0:
     segments = load_dir1("/home/sgui/test_audios")
-elif sample_type==1:
+elif args.sample==1:
     segments = load_dir("/home/sgui/test_audios")
 else :
     input_file_path="tests/4bR5h-ecBZg-all.wav"
@@ -70,39 +95,11 @@ else :
             sliced_audio.export(batch_wav_path, format="wav")
         segments.append(batch_wav_path)
 
-# segments = ["/home/sgui/test_audios/121-123852-0004.flac",
-#             "/home/sgui/test_audios/121-123852-0004.flac"]
-models=[]
-# test_case = [["tor", "ch"],
-#              ["f32", "f32"], ["f32", "bf16"], ["f32", "f16"],
-#              ["bf16", "f32"], ["bf16", "bf16"], ["bf16", "f16"],
-#              ["f16", "f32"], ["f16", "bf16"], ["f16", "f16"],
-#             ]
-# test_case = [["tor", "ch"], ["f32", "f32"]]
-# test_case = [["bf16", "bf16"], ["f16", "f16"]]
-if test_type==0:
-    test_case = [[0, "bf16", "bf16"],[1, "bf16", "bf16"],[2, "bf16", "bf16"]]
-elif test_type==1:
-    test_case = [["bf16", "bf16"], ["f16", "f16"]]
-elif test_type==2:
-    test_case = [["f32", "f32"], ["bf16", "bf16"]]
-elif test_type==3:
-    test_case = [["f32", "f32"], ["bf16", "bf16"], ["f16", "f16"]]
-elif test_type==4:
-    test_case = [["tor", "ch"], ["f32", "f32"], ["bf16", "bf16"], ["f16", "f16"]]
-elif test_type==5:
-    test_case = [[0, "tor", "ch"],
-                 [0, "f32", "f32"],[1, "f32", "f32"],[2, "f32", "f32"],
-                 [0, "bf16", "bf16"],[1, "bf16", "bf16"],[2, "bf16", "bf16"],
-                 [0, "f16", "f16"],[1, "f16", "f16"],[2, "f16", "f16"]]
+model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", 
+                                   implement_type=args.implement, enc_type=args.enc, dec_type=args.dec)
+model_name = f"{args.implement}-{args.enc}-{args.dec}"
 
-for implement_type, enc_type, dec_type in test_case:
-    model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", 
-                                       implement_type=implement_type,
-                                       enc_type=enc_type, dec_type=dec_type)
-    models.append([model, f"{implement_type}-{enc_type}-{dec_type}"])
-
-if check_mem:
+if args.check_mem:
     mem = psutil.virtual_memory()
     total = mem.total / 1024 ** 3
     print(f"总内存: {total:.2f} GB")
@@ -122,52 +119,65 @@ if check_mem:
         f"Max RSS: {max_rss:.2f} GB, Max VMS: {max_vms:.2f} GB, "
         f"{max_rss / total * 100:.2f}%, {count} files to process")
 
+total_count = len(segments)
+if total_count < args.warmup:
+    args.warmup = total_count
+elif args.warmup < 0:
+    args.warmup = 0
+
+if total_count < args.loop or args.loop < 1:
+    args.loop = total_count
+
+for index in range(args.warmup):
+    batch_wav_path = segments[index]                 
+    batch_uttid = [index]
+    batch_wav_path = [batch_wav_path]          
+    results = model.transcribe(batch_uttid, batch_wav_path,
+            {"beam_size": 3, "nbest": 1, "decode_max_len": 0,
+             "softmax_smoothing": 1.25, "aed_length_penalty": 0.6,
+             "eos_penalty": 1.0, "decode_min_len": 0,
+             "repetition_penalty": 1.0, "llm_length_penalty": 0.0, 
+             "temperature": 1.0})
+
 for j in range(1):
-    for model, typename in models:
-        total_rtf = 0.0
-        total_dur = 0.0
-        total_elapsed = 0.0
-        count = 2 #len(segments)
-        # count = len(segments)
-        for i in range(count):
-            batch_wav_path = segments[i]
+    total_rtf = 0.0
+    total_dur = 0.0
+    total_elapsed = 0.0
+    total_tokens = 0
+    # total_count = 3
+    for i in range(args.loop):
+        batch_wav_path = segments[i]
                    
-            batch_uttid = [i]
-            batch_wav_path = [batch_wav_path]
+        batch_uttid = [i]
+        batch_wav_path = [batch_wav_path]
             
-            results = model.transcribe(
-                batch_uttid,
-                batch_wav_path,
-                {
-                    "beam_size": 3,
-                    "nbest": 1,
-                    "decode_max_len": 0,
-                    "softmax_smoothing": 1.25,
-                    "aed_length_penalty": 0.6,
-                    "eos_penalty": 1.0,
-                    "decode_min_len": 0,
-                    "repetition_penalty": 1.0,
-                    "llm_length_penalty": 0.0,
-                    "temperature": 1.0
-                }
-            )
-            # if len(results[0]['text'])==0:
-            #     print(f"{typename}, {segments[i]}")
-            total_rtf += float(results[0]['rtf'])
-            total_dur += float(results[0]['total_dur'])
-            total_elapsed += float(results[0]['elapsed'])
-            if check_mem:
-                mem_info = process.memory_info()
-                rss = mem_info.rss / 1024 ** 3
-                vms = mem_info.vms / 1024 ** 3
-                if max_rss < rss :
-                    max_rss = rss
-                if max_vms < vms :
-                    max_vms = vms
-                print(f"RSS: {rss:.2f} GB, VMS: {vms:.2f} GB, "
-                    f"Max RSS: {max_rss:.2f} GB, Max VMS: {max_vms:.2f} GB, {max_rss / total * 100:.2f}%, "
-                    f"batch_wav_path={batch_wav_path}"
-                    )
-        total_rtf = total_rtf/count
-        total_rtf1 = total_elapsed / total_dur
-        print(f"{typename}, total_rtf={total_rtf:.4f}, {total_rtf1:.4f} @ {count}")  
+        results = model.transcribe(
+            batch_uttid, batch_wav_path,
+            {"beam_size": 3, "nbest": 1, "decode_max_len": 0,
+             "softmax_smoothing": 1.25, "aed_length_penalty": 0.6,
+             "eos_penalty": 1.0, "decode_min_len": 0,
+             "repetition_penalty": 1.0, "llm_length_penalty": 0.0,
+             "temperature": 1.0})
+        if len(results[0]['text'])==0:
+            print(f"{model_name}, {segments[i]}")
+        total_rtf += float(results[0]['rtf'])
+        total_dur += float(results[0]['total_dur'])
+        total_elapsed += float(results[0]['elapsed'])
+        total_tokens += int(results[0]['tokens'])
+        if args.check_mem:
+            mem_info = process.memory_info()
+            rss = mem_info.rss / 1024 ** 3
+            vms = mem_info.vms / 1024 ** 3
+            if max_rss < rss :
+                max_rss = rss
+            if max_vms < vms :
+                max_vms = vms
+            print(f"RSS: {rss:.2f} GB, VMS: {vms:.2f} GB, "
+                f"Max RSS: {max_rss:.2f} GB, Max VMS: {max_vms:.2f} GB, {max_rss / total * 100:.2f}%, "
+                f"batch_wav_path={batch_wav_path}"
+                )
+    total_rtf = total_rtf/args.loop
+    total_rtf1 = total_elapsed / total_dur
+    print(f"{model_name}, total_rtf={total_rtf:.4f}, total_duration={total_dur}, "
+          f"total_processing_latency={total_elapsed:.4f}, total_tokens={total_tokens}, "
+          f"rtf={total_rtf1:.4f} @ {args.loop}")  
