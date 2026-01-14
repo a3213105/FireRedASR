@@ -11,5 +11,5 @@ for row in "${test_cases[@]}"; do
   # 将 row 按空格拆分为 3 个字段
   IFS=' ' read -r implement_type enc_type dec_type <<< "${row}"
 #   echo "implement_type=${implement_type}, enc_type=${enc_type}, dec_type=${dec_type}"
-  numactl -C32-39 python test_ali1.py -i ${implement_type} -e ${enc_type} -d ${dec_type}
+  numactl -C32-39,160-167 python test_ali1.py -i ${implement_type} -e ${enc_type} -d ${dec_type}
 done

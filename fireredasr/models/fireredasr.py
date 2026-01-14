@@ -3,7 +3,7 @@ import time
 import torch
 
 from fireredasr.data.asr_feat import ASRFeatExtractor
-from fireredasr.models.fireredasr_aed import FireRedAsrAed_ov, FireRedAsrAed_ov1, FireRedAsrAed_ov2, FireRedAsrAed, FireRedAsrAed1
+from fireredasr.models.fireredasr_aed import FireRedAsrAed_ov, FireRedAsrAed_ov1, FireRedAsrAed_ov2, FireRedAsrAed
 from fireredasr.models.fireredasr_llm import FireRedAsrLlm, FireRedAsrLlm_ov
 from fireredasr.tokenizer.aed_tokenizer import ChineseCharEnglishSpmTokenizer
 from fireredasr.tokenizer.llm_tokenizer import LlmTokenizerWrapper
@@ -119,16 +119,13 @@ class FireRedAsr:
 def load_fireredasr_aed_model(model_path, implement_type, enc_type, dec_type, cache_size):
     if implement_type == 0 :
         model_ov = FireRedAsrAed_ov(None, None, model_path, enc_type, dec_type, cache_size)
-    elif implement_type == 1:
-        model_ov = FireRedAsrAed_ov1(None, None, model_path, enc_type, dec_type, cache_size)
-    else :
+    elif implement_type == 2:
         model_ov = FireRedAsrAed_ov2(None, None, model_path, enc_type, dec_type, cache_size)
+    else :
+        model_ov = FireRedAsrAed_ov1(None, None, model_path, enc_type, dec_type, cache_size)
     if not model_ov.using_ov:
         package = torch.load(model_path, map_location=lambda storage, loc: storage, weights_only=False)
-        if implement_type == 0 :
-            model = FireRedAsrAed.from_args(package["args"])
-        else :
-            model = FireRedAsrAed1.from_args(package["args"])
+        model = FireRedAsrAed.from_args(package["args"])
         model.load_state_dict(package["model_state_dict"], strict=True)
         model.eval()
         model_ov.torch_model = model

@@ -4,21 +4,23 @@ import os
 import psutil
 
 batch_uttid = ["1","2","3","4"]
-batch_wav_path = ["examples/wav/BAC009S0764W0121.wav",
+batch_wav_paths = ["examples/wav/BAC009S0764W0121.wav",
                   "examples/wav/IT0011W0001.wav",
                   "examples/wav/TEST_NET_Y0000000000_-KTKHdZ2fb8_S00000.wav",
                   "examples/wav/TEST_MEETING_T0000000001_S00000.wav"]
 
 batch_uttid = ["1"]
-batch_wav_path = ["examples/wav/BAC009S0764W0121.wav"]
-# batch_wav_path = ["examples/wav/IT0011W0001.wav"]
-# batch_wav_path = ["examples/wav/TEST_NET_Y0000000000_-KTKHdZ2fb8_S00000.wav"]
-# batch_wav_path = ["examples/wav/TEST_MEETING_T0000000001_S00000.wav"]
-# batch_wav_path = ["examples/wav/4bR5h-ecBZg.wav"]
-# batch_wav_path = ["examples/wav/7184a192e882c87276778a96423a29c6_585.885.wav"]
-# batch_wav_path = ["examples/wav/7184a192e882c87276778a96423a29c6_2.080.wav"]
-batch_wav_path = ["examples/wav/7184a192e882c87276778a96423a29c6_835.655.wav"]
-batch_wav_path = ["tests/7184a192e882c87276778a96423a29c6_393.625.wav"]
+batch_wav_paths = []
+batch_wav_paths.append("examples/wav/BAC009S0764W0121.wav")
+batch_wav_paths.append("examples/wav/IT0011W0001.wav")
+batch_wav_paths.append("examples/wav/TEST_NET_Y0000000000_-KTKHdZ2fb8_S00000.wav")
+batch_wav_paths.append("examples/wav/TEST_MEETING_T0000000001_S00000.wav")
+# batch_wav_paths.append("examples/wav/4bR5h-ecBZg.wav")
+batch_wav_paths.append("tests/7184a192e882c87276778a96423a29c6_585.885.wav")
+batch_wav_paths.append("tests/7184a192e882c87276778a96423a29c6_2.080.wav")
+batch_wav_paths.append("tests/7184a192e882c87276778a96423a29c6_835.655.wav")
+batch_wav_paths.append("tests/7184a192e882c87276778a96423a29c6_393.625.wav")
+
 
 duration_list = [4.2, 1.99, 1.8, 12.37, 27.26]
 results_list = ["甚至出现交易几乎停滞的情况", 
@@ -26,34 +28,17 @@ results_list = ["甚至出现交易几乎停滞的情况",
                 "我有的时候说不清楚你们知道吗", 
                 "好首先说一下刚才这个经理说完的这个销售问题咱再说一下咱们的商场问题首先咱们商场上半年业这个先各部门儿汇报一下就是业绩"]
 
-
+test_case = [[0,'tor','ch '],
+             [0,'f32','f32'], [1,'f32','f32'], [2,'f32','f32'],
+             [0,'bf16','bf16'], [1,'bf16','bf16'], [2,'bf16','bf16'],
+             [0,'f16','f16'], [1,'f16','f16'], [2,'f16','f16'],
+            ]
 # FireRedASR-AED
 models=[]
-# model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="tor", dec_type="ch")
-# models.append([model, "torch"])
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
-                                   implement_type=0, enc_type="f32", dec_type="f32")
-models.append([model, "0-f32-f32"])
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
-                                   implement_type=1, enc_type="f32", dec_type="f32")
-models.append([model, "1-f32-f32"])
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
-                                   implement_type=2, enc_type="f32", dec_type="f32")
-models.append([model, "2-f32-f32"])
-
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
-                                   implement_type=0, enc_type="bf16", dec_type="bf16")
-models.append([model, "0-bf16-bf16"])
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
-                                   implement_type=1, enc_type="bf16", dec_type="bf16")
-models.append([model, "1-bf16-bf16"])
-model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
-                                   implement_type=2, enc_type="bf16", dec_type="bf16")
-models.append([model, "2-bf16-bf16"])
-# model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="bf16", dec_type="bf16")
-# models.append([model, "bf16-bf16"])
-# model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L", enc_type="f32", dec_type="f16")
-# models.append([model, "f32-f16"])
+for it in test_case:
+    model = FireRedAsr.from_pretrained("aed", "pretrained_models/FireRedASR-AED-L",
+                                    implement_type=it[0], enc_type=it[1], dec_type=it[2])
+    models.append([model, f"{it[0]}-{it[1]}-{it[2]}"])
 
 mem = psutil.virtual_memory()
 total = mem.total / 1024 ** 3
@@ -68,36 +53,39 @@ vms = mem_info.vms / 1024 ** 3
 print(f"Init RSS: {rss:.2f} GB, VMS: {vms:.2f} GB, {rss / total * 100:.2f}%")
 
 
-texts = []
-for i, (model, typename) in enumerate(models):   
-    results = model.transcribe(
-        batch_uttid,
-        batch_wav_path,
-        {
-            # "infer_mode": i,  # 0: torch, 1: ov_encoder, 2: ov_encoder+decoder, 3: ov_decoder
-            "beam_size": 3,
-            "nbest": 1,
-            "decode_max_len": 0,
-            "softmax_smoothing": 1.25,
-            "aed_length_penalty": 0.6,
-            "eos_penalty": 1.0,
-            "decode_min_len": 0,
-            "repetition_penalty": 1.0,
-            "llm_length_penalty": 0.0,
-            "temperature": 1.0
-        }
-    )
 
-    print(f"infer_mode({i}):{typename}\trtf={results[0]['rtf']}, results= {results[0]['text']}")
-    texts.append([results[0]['text'], results[0]['rtf']])
+for batch_wav_path in batch_wav_paths:
+    texts = []
+    for i, (model, typename) in enumerate(models):   
+        results = model.transcribe(
+            batch_uttid,
+            [batch_wav_path],
+            {
+                # "infer_mode": i,  # 0: torch, 1: ov_encoder, 2: ov_encoder+decoder, 3: ov_decoder
+                "beam_size": 3,
+                "nbest": 1,
+                "decode_max_len": 0,
+                "softmax_smoothing": 1.25,
+                "aed_length_penalty": 0.6,
+                "eos_penalty": 1.0,
+                "decode_min_len": 0,
+                "repetition_penalty": 1.0,
+                "llm_length_penalty": 0.0,
+                "temperature": 1.0
+            }
+        )
+
+        print(f"infer_mode({i:2d}):{typename}\trtf={results[0]['rtf']}, results= {results[0]['text']}")
+        texts.append([results[0]['text'], results[0]['rtf']])
+
+    import difflib
+    for i, (_, typename) in enumerate(models):   
+        similarity = difflib.SequenceMatcher(None, texts[i][0], texts[0][0]).ratio()
+        print(f"similarity_{typename}={similarity:.2f}, rtf={texts[i][1]}")
 
 mem_info = process.memory_info()
 rss = mem_info.rss / 1024 ** 3
 vms = mem_info.vms / 1024 ** 3
 print(f"RSS: {rss:.2f} GB, VMS: {vms:.2f} GB, {rss / total * 100:.2f}%")
 
-import difflib
-for i, (_, typename) in enumerate(models):   
-    similarity = difflib.SequenceMatcher(None, texts[i][0], texts[0][0]).ratio()
-    print(f"similarity_{typename}={similarity:.2f}, rtf={texts[i][1]}")
 
